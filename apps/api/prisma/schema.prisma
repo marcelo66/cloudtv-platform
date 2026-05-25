@@ -1,0 +1,261 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── USERS & AUTH ────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  name         String
+  avatarUrl    String?  @map("avatar_url")
+  role         Role     @default(USER)
+  plan         Plan     @default(FREE)
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  channels      Channel[]
+  refreshTokens RefreshToken[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("refresh_tokens")
+}
+
+// ─── CHANNEL ─────────────────────────────────────────────────
+
+model Channel {
+  id          String        @id @default(cuid())
+  userId      String        @map("user_id")
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String
+  slug        String        @unique
+  description String?
+  logoUrl     String?       @map("logo_url")
+  status      ChannelStatus @default(OFFLINE)
+  streamKey   String        @unique @map("stream_key") @default(cuid())
+  hlsUrl      String?       @map("hls_url")
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
+
+  videos     Video[]
+  playlists  Playlist[]
+  overlays   Overlay[]
+  schedules  Schedule[]
+  outputs    StreamOutput[]
+  logs       PlayoutLog[]
+
+  @@map("channels")
+}
+
+// ─── VIDEOS ──────────────────────────────────────────────────
+
+model Video {
+  id            String      @id @default(cuid())
+  channelId     String      @map("channel_id")
+  channel       Channel     @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  title         String
+  description   String?
+  status        VideoStatus @default(PENDING)
+  originalKey   String      @map("original_key")
+  processedKey  String?     @map("processed_key")
+  thumbnailUrl  String?     @map("thumbnail_url")
+  duration      Float?
+  width         Int?
+  height        Int?
+  fps           Float?
+  codec         String?
+  bitrate       Int?
+  fileSize      BigInt      @map("file_size")
+  mimeType      String      @map("mime_type")
+  tags          String[]    @default([])
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime    @updatedAt @map("updated_at")
+
+  playlistItems PlaylistItem[]
+
+  @@map("videos")
+}
+
+// ─── PLAYLISTS ───────────────────────────────────────────────
+
+model Playlist {
+  id            String         @id @default(cuid())
+  channelId     String         @map("channel_id")
+  channel       Channel        @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  name          String
+  description   String?
+  loopMode      LoopMode       @default(LOOP_ALL) @map("loop_mode")
+  isDefault     Boolean        @default(false) @map("is_default")
+  totalDuration Float?         @map("total_duration")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+
+  items     PlaylistItem[]
+  schedules Schedule[]
+
+  @@map("playlists")
+}
+
+model PlaylistItem {
+  id         String   @id @default(cuid())
+  playlistId String   @map("playlist_id")
+  playlist   Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  videoId    String   @map("video_id")
+  video      Video    @relation(fields: [videoId], references: [id])
+  order      Int
+  trimStart  Float?   @map("trim_start")
+  trimEnd    Float?   @map("trim_end")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@unique([playlistId, order])
+  @@map("playlist_items")
+}
+
+// ─── SCHEDULER ───────────────────────────────────────────────
+
+model Schedule {
+  id         String     @id @default(cuid())
+  channelId  String     @map("channel_id")
+  channel    Channel    @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  playlistId String?    @map("playlist_id")
+  playlist   Playlist?  @relation(fields: [playlistId], references: [id])
+  name       String
+  startTime  DateTime   @map("start_time")
+  endTime    DateTime   @map("end_time")
+  recurrence Recurrence @default(ONCE)
+  priority   Int        @default(0)
+  createdAt  DateTime   @default(now()) @map("created_at")
+
+  @@map("schedules")
+}
+
+// ─── OVERLAYS ────────────────────────────────────────────────
+
+model Overlay {
+  id        String      @id @default(cuid())
+  channelId String      @map("channel_id")
+  channel   Channel     @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  name      String
+  type      OverlayType
+  enabled   Boolean     @default(true)
+  config    Json
+  zIndex    Int         @default(0) @map("z_index")
+  createdAt DateTime    @default(now()) @map("created_at")
+  updatedAt DateTime    @updatedAt @map("updated_at")
+
+  @@map("overlays")
+}
+
+// ─── STREAM OUTPUTS ───────────────────────────────────────────
+
+model StreamOutput {
+  id        String       @id @default(cuid())
+  channelId String       @map("channel_id")
+  channel   Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  name      String
+  platform  Platform
+  rtmpUrl   String       @map("rtmp_url")
+  streamKey String       @map("stream_key")
+  enabled   Boolean      @default(true)
+  status    OutputStatus @default(IDLE)
+  createdAt DateTime     @default(now()) @map("created_at")
+  updatedAt DateTime     @updatedAt @map("updated_at")
+
+  @@map("stream_outputs")
+}
+
+// ─── PLAYOUT LOGS ─────────────────────────────────────────────
+
+model PlayoutLog {
+  id        String   @id @default(cuid())
+  channelId String   @map("channel_id")
+  channel   Channel  @relation(fields: [channelId], references: [id])
+  event     String
+  details   Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("playout_logs")
+}
+
+// ─── ENUMS ────────────────────────────────────────────────────
+
+enum Role {
+  USER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum Plan {
+  FREE
+  STARTER
+  PRO
+  ENTERPRISE
+}
+
+enum ChannelStatus {
+  OFFLINE
+  LIVE_PLAYLIST
+  LIVE_RTMP
+  STARTING
+  ERROR
+}
+
+enum VideoStatus {
+  PENDING
+  PROCESSING
+  READY
+  ERROR
+  ARCHIVED
+}
+
+enum LoopMode {
+  LOOP_ALL
+  LOOP_ONE
+  SEQUENTIAL
+}
+
+enum Recurrence {
+  ONCE
+  DAILY
+  WEEKLY
+  WEEKDAYS
+  WEEKENDS
+}
+
+enum OverlayType {
+  LOGO
+  TEXT_STATIC
+  TEXT_SCROLL
+  CLOCK
+  TICKER
+}
+
+enum Platform {
+  YOUTUBE
+  FACEBOOK
+  TWITCH
+  RTMP_CUSTOM
+}
+
+enum OutputStatus {
+  IDLE
+  STREAMING
+  ERROR
+}

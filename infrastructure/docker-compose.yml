@@ -1,0 +1,166 @@
+version: '3.9'
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  CloudTV Platform — docker-compose PRODUCCIÓN
+#  Copiar .env.example → .env y completar los valores
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+networks:
+  cloudtv:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+
+services:
+
+  # ─── Base de datos ──────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: cloudtv-postgres
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB}
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - cloudtv
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ─── Cola de trabajos ───────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: cloudtv-redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+    networks:
+      - cloudtv
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ─── Storage de archivos (MinIO = S3 privado) ───────────────
+  minio:
+    image: minio/minio:latest
+    container_name: cloudtv-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER:     ${MINIO_ROOT_USER:-cloudtvadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+    networks:
+      - cloudtv
+    ports:
+      - "9001:9001"   # Consola de administración MinIO
+    restart: unless-stopped
+
+  # ─── Inicializar bucket de MinIO ────────────────────────────
+  minio-init:
+    image: minio/mc:latest
+    container_name: cloudtv-minio-init
+    depends_on:
+      - minio
+    networks:
+      - cloudtv
+    entrypoint: >
+      /bin/sh -c "
+        sleep 8;
+        mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-cloudtvadmin} ${MINIO_ROOT_PASSWORD};
+        mc mb --ignore-existing local/${R2_BUCKET:-cloudtv-storage};
+        mc anonymous set download local/${R2_BUCKET:-cloudtv-storage};
+        echo '✓ Bucket listo';
+      "
+    restart: on-failure
+
+  # ─── Transmisor RTMP / HLS ──────────────────────────────────
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: cloudtv-mediamtx
+    ports:
+      - "1935:1935"   # ← OBS/vMix conecta aquí con RTMP
+      - "8888:8888"   # ← HLS output interno
+      - "9997:9997"   # API de control
+    volumes:
+      - ../infrastructure/mediamtx/mediamtx.yml:/mediamtx.yml:ro
+    networks:
+      - cloudtv
+    restart: unless-stopped
+
+  # ─── API + Worker (NestJS) ──────────────────────────────────
+  api:
+    build:
+      context: ../apps/api
+      dockerfile: Dockerfile
+    container_name: cloudtv-api
+    environment:
+      NODE_ENV:           production
+      PORT:               4000
+      DATABASE_URL:       postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_HOST:         redis
+      REDIS_PORT:         6379
+      REDIS_PASSWORD:     ${REDIS_PASSWORD}
+      JWT_SECRET:         ${JWT_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      JWT_EXPIRES_IN:     15m
+      JWT_REFRESH_EXPIRES_IN: 7d
+      R2_ENDPOINT:        http://minio:9000
+      R2_ACCESS_KEY_ID:   ${MINIO_ROOT_USER:-cloudtvadmin}
+      R2_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      R2_BUCKET:          ${R2_BUCKET:-cloudtv-storage}
+      R2_PUBLIC_URL:      http://${SERVER_HOST:-localhost}:9000/${R2_BUCKET:-cloudtv-storage}
+      FFMPEG_THREADS:     ${FFMPEG_THREADS:-2}
+      FFMPEG_PRESET:      ${FFMPEG_PRESET:-veryfast}
+      MEDIAMTX_API_URL:   http://mediamtx:9997
+      APP_URL:            ${APP_URL:-http://localhost}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - cloudtv
+    restart: unless-stopped
+
+  # ─── Frontend (Next.js) ─────────────────────────────────────
+  frontend:
+    build:
+      context: ../apps/frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${APP_URL:-http://localhost}/api
+    container_name: cloudtv-frontend
+    environment:
+      NEXT_PUBLIC_API_URL: ${APP_URL:-http://localhost}/api
+    depends_on:
+      - api
+    networks:
+      - cloudtv
+    restart: unless-stopped
+
+  # ─── Portero (Nginx) ────────────────────────────────────────
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: cloudtv-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ../infrastructure/nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+      - frontend
+      - api
+    networks:
+      - cloudtv
+    restart: unless-stopped

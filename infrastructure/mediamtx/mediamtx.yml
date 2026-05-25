@@ -1,0 +1,58 @@
+###############################################
+# MediaMTX — CloudTV Platform Config
+###############################################
+
+# API REST para control programático
+api: yes
+apiAddress: :9997
+
+# Logging
+logLevel: info
+logDestinations: [stdout]
+
+# ─── RTMP ──────────────────────────────────
+rtmp: yes
+rtmpAddress: :1935
+rtmpEncryption: no
+
+# ─── HLS ───────────────────────────────────
+hls: yes
+hlsAddress: :8888
+hlsAlwaysRemux: no
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 2s
+hlsPartDuration: 200ms
+hlsDirectory: ""  # Sirve en memoria
+
+# ─── RTSP ──────────────────────────────────
+rtsp: yes
+rtspAddress: :8554
+
+# ─── WebRTC (futuro) ────────────────────────
+webrtc: no
+
+# ─── Rutas ─────────────────────────────────
+# Acepta streams bajo /live/{streamKey}
+# El API valida la key via hook HTTP
+
+paths:
+  "~^live/.+$":
+    # Hook: valida la stream key antes de aceptar
+    # En dev está deshabilitado para facilitar pruebas
+    # En prod: descomentar las líneas publishOverrideQuery
+
+    # publishOverrideQuery: yes
+    # runOnPublish: >
+    #   curl -sf -X POST http://host.docker.internal:4000/internal/stream/rtmp-connect
+    #   -H "Content-Type: application/json"
+    #   -H "X-Internal-Secret: ${INTERNAL_API_SECRET}"
+    #   -d "{\"path\":\"$MTX_PATH\"}"
+    # runOnUnpublish: >
+    #   curl -sf -X POST http://host.docker.internal:4000/internal/stream/rtmp-disconnect
+    #   -H "Content-Type: application/json"
+    #   -H "X-Internal-Secret: ${INTERNAL_API_SECRET}"
+    #   -d "{\"path\":\"$MTX_PATH\"}"
+
+    source: publisher
+    sourceOnDemand: no

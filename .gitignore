@@ -1,0 +1,31 @@
+# Dependencias
+node_modules
+.pnpm-store
+
+# Variables de entorno — NUNCA subir al repo
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Build
+dist
+.next
+*.tsbuildinfo
+.turbo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Base de datos local
+prisma/migrations
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Temporales
+/tmp
+hls-output
+coverage
