@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { VideoStatus } from '@prisma/client';
 import { spawn, ChildProcess } from 'child_process';
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -316,20 +317,22 @@ export class PlayoutService implements OnModuleDestroy {
 
   private async getActivePlaylist(channelId: string) {
     const now = new Date();
-    const videoSelect = {
-      id: true,
-      originalKey: true,
-      processedKey: true,
-      duration: true,
-      status: true,
-    };
-    const itemsInclude = {
-      items: {
-        where: { video: { status: 'READY' } },
-        orderBy: { order: 'asc' as const },
-        include: { video: { select: videoSelect } },
+
+    const itemsArgs = {
+      where: { video: { status: VideoStatus.READY } },
+      orderBy: { order: 'asc' as const },
+      include: {
+        video: {
+          select: {
+            id: true,
+            originalKey: true,
+            processedKey: true,
+            duration: true,
+            status: true,
+          },
+        },
       },
-    };
+    } as const;
 
     // 1. Programa activo ahora
     const schedule = await this.prisma.schedule.findFirst({
@@ -340,21 +343,25 @@ export class PlayoutService implements OnModuleDestroy {
         endTime:   { gte: now },
       },
       orderBy: { priority: 'desc' },
-      include: { playlist: { include: itemsInclude } },
+      include: {
+        playlist: {
+          include: { items: itemsArgs },
+        },
+      },
     });
     if (schedule?.playlist?.items?.length) return schedule.playlist;
 
     // 2. Default playlist
     const def = await this.prisma.playlist.findFirst({
       where: { channelId, isDefault: true },
-      include: itemsInclude,
+      include: { items: itemsArgs },
     });
     if (def?.items?.length) return def;
 
     // 3. Primera playlist
     return this.prisma.playlist.findFirst({
       where: { channelId },
-      include: itemsInclude,
+      include: { items: itemsArgs },
     });
   }
 }
