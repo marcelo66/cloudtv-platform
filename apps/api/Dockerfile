@@ -1,7 +1,7 @@
-FROM node:20-alpine AS base
+FROM node:20-slim AS base
 RUN npm install -g pnpm
 
-# ─── Instalar dependencias de la API ─────────────────────────
+# ─── Instalar dependencias ────────────────────────────────────
 FROM base AS deps
 WORKDIR /app
 COPY apps/api/package.json ./package.json
@@ -15,9 +15,12 @@ COPY apps/api/ .
 RUN ./node_modules/.bin/prisma generate
 RUN ./node_modules/.bin/nest build
 
-# ─── Imagen final de producción ──────────────────────────────
-FROM node:20-alpine AS runner
-RUN apk add --no-cache ffmpeg postgresql-client
+# ─── Imagen final ─────────────────────────────────────────────
+FROM node:20-slim AS runner
+# Instalar FFmpeg + OpenSSL + cliente de postgres
+RUN apt-get update && \
+    apt-get install -y ffmpeg openssl postgresql-client && \
+    rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV NODE_ENV=production
 
@@ -28,12 +31,11 @@ COPY apps/api/package.json            ./package.json
 
 EXPOSE 4000
 
-# Espera a que Postgres esté listo antes de arrancar
+# Espera a que Postgres esté listo, luego crea las tablas y arranca
 CMD sh -c "\
   echo 'Esperando base de datos...' && \
-  until pg_isready -h ${DB_HOST:-postgres} -p 5432 -q; do \
-    sleep 2; \
-  done && \
-  echo 'Base de datos lista!' && \
+  until pg_isready -h ${DB_HOST:-postgres} -p 5432 -q; do sleep 2; done && \
+  echo 'Conectado. Creando tablas...' && \
   node_modules/.bin/prisma db push --skip-generate && \
+  echo 'Iniciando API...' && \
   node dist/main"
