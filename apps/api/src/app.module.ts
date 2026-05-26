@@ -9,6 +9,7 @@ import { WorkerModule } from './modules/worker/worker.module';
 import { StorageModule } from './modules/storage/storage.module';
 import { PrismaModule } from './modules/prisma/prisma.module';
 import { PlaylistsModule } from './modules/playlists/playlists.module';
+import { SchedulesModule } from './modules/schedules/schedules.module';
 
 @Module({
   imports: [
@@ -44,6 +45,7 @@ import { PlaylistsModule } from './modules/playlists/playlists.module';
     ChannelsModule,
     VideosModule,
     PlaylistsModule,
+    SchedulesModule,
     WorkerModule,
   ],
 })
