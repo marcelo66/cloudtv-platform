@@ -16,34 +16,34 @@ export class PlaylistsController {
 
   @Post()
   create(@Body() dto: CreatePlaylistDto, @Req() req: any) {
-    return this.service.create(dto, req.user.sub);
+    return this.service.create(dto, req.user.id);
   }
 
   @Get()
   findAll(@Query('channelId') channelId: string, @Req() req: any) {
-    return this.service.findAll(channelId, req.user.sub);
+    return this.service.findAll(channelId, req.user.id);
   }
 
   @Get(':id')
   findOne(@Param('id') id: string, @Req() req: any) {
-    return this.service.findOne(id, req.user.sub);
+    return this.service.findOne(id, req.user.id);
   }
 
   @Patch(':id')
   update(@Param('id') id: string, @Body() dto: UpdatePlaylistDto, @Req() req: any) {
-    return this.service.update(id, dto, req.user.sub);
+    return this.service.update(id, dto, req.user.id);
   }
 
   @Delete(':id')
   remove(@Param('id') id: string, @Req() req: any) {
-    return this.service.remove(id, req.user.sub);
+    return this.service.remove(id, req.user.id);
   }
 
   // ─── Items ────────────────────────────────────────────────────
 
   @Post(':id/items')
   addItem(@Param('id') id: string, @Body() dto: AddItemDto, @Req() req: any) {
-    return this.service.addItem(id, dto, req.user.sub);
+    return this.service.addItem(id, dto, req.user.id);
   }
 
   @Delete(':id/items/:itemId')
@@ -52,7 +52,7 @@ export class PlaylistsController {
     @Param('itemId') itemId: string,
     @Req() req: any,
   ) {
-    return this.service.removeItem(id, itemId, req.user.sub);
+    return this.service.removeItem(id, itemId, req.user.id);
   }
 
   @Patch(':id/items/reorder')
@@ -61,6 +61,6 @@ export class PlaylistsController {
     @Body() dto: ReorderItemsDto,
     @Req() req: any,
   ) {
-    return this.service.reorderItems(id, dto, req.user.sub);
+    return this.service.reorderItems(id, dto, req.user.id);
   }
 }
