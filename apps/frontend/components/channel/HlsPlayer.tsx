@@ -5,17 +5,25 @@ import { Tv, Loader2, AlertTriangle } from 'lucide-react';
 
 interface Props {
   src: string;
-  /** Si es false no se intenta cargar el stream (canal offline) */
+  /** true cuando el canal está LIVE_PLAYLIST / LIVE_RTMP → carga el stream */
   active?: boolean;
+  /** true cuando el canal está STARTING → muestra spinner sin intentar cargar */
+  starting?: boolean;
 }
 
-export function HlsPlayer({ src, active = true }: Props) {
+export function HlsPlayer({ src, active = true, starting = false }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<any>(null);
-  const [state, setState] = useState<'loading' | 'playing' | 'error' | 'offline'>('offline');
+  const [state, setState] = useState<'loading' | 'playing' | 'error' | 'offline' | 'starting'>('offline');
   const [errorMsg, setErrorMsg] = useState('');
 
   useEffect(() => {
+    if (starting && !active) {
+      setState('starting');
+      hlsRef.current?.destroy();
+      return;
+    }
+
     if (!active) {
       setState('offline');
       hlsRef.current?.destroy();
@@ -106,7 +114,7 @@ export function HlsPlayer({ src, active = true }: Props) {
       hlsRef.current?.destroy();
       hlsRef.current = null;
     };
-  }, [src, active]);
+  }, [src, active, starting]);
 
   return (
     <div className="relative w-full h-full bg-black">
@@ -133,6 +141,15 @@ export function HlsPlayer({ src, active = true }: Props) {
               Iniciá la emisión para ver la señal en vivo
             </p>
           </div>
+        </div>
+      )}
+
+      {state === 'starting' && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
+          <Loader2 className="w-8 h-8 text-yellow-500 animate-spin" />
+          <p className="text-sm text-slate-300">Iniciando canal...</p>
+          <p className="text-xs text-slate-600">FFmpeg está codificando los primeros segmentos HLS</p>
+          <p className="text-xs text-slate-600">Puede tardar entre 15 y 40 segundos</p>
         </div>
       )}
 

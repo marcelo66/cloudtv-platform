@@ -206,15 +206,10 @@ export class PlayoutService implements OnModuleDestroy {
 
     proc.stdout.on('data', () => { /* ignorar */ });
 
-    proc.on('spawn', async () => {
-      // Marcar como LIVE en cuanto FFmpeg arranca
-      if (!session.stopping) {
-        await this.prisma.channel.update({
-          where: { id: session.channelId },
-          data: { status: 'LIVE_PLAYLIST' },
-        }).catch(() => {});
-        this.logger.log(`[${session.channelId}] Canal en LIVE_PLAYLIST`);
-      }
+    proc.on('spawn', () => {
+      this.logger.log(`[${session.channelId}] FFmpeg arrancó, esperando primer segmento...`);
+      // Esperamos a que index.m3u8 exista antes de marcar LIVE
+      this.waitForM3u8(session, indexPath);
     });
 
     proc.on('close', (code) => {
@@ -241,6 +236,45 @@ export class PlayoutService implements OnModuleDestroy {
         }).catch(() => {});
       }
     });
+  }
+
+  // ─── Esperar a que el primer segmento HLS esté listo ──────────
+
+  private waitForM3u8(session: PlayoutSession, indexPath: string) {
+    const MAX_WAIT_MS = 180_000; // 3 minutos máximo
+    const POLL_MS = 2_000;
+    const started = Date.now();
+
+    const check = async () => {
+      if (session.stopping) return;
+
+      try {
+        await fs.access(indexPath);
+        // ¡Archivo existe! Marcar como LIVE
+        if (!session.stopping) {
+          await this.prisma.channel.update({
+            where: { id: session.channelId },
+            data: { status: 'LIVE_PLAYLIST' },
+          });
+          this.logger.log(`[${session.channelId}] index.m3u8 listo → LIVE_PLAYLIST`);
+        }
+      } catch {
+        // No existe aún
+        if (Date.now() - started < MAX_WAIT_MS) {
+          setTimeout(check, POLL_MS);
+        } else {
+          this.logger.error(
+            `[${session.channelId}] Timeout esperando index.m3u8 (${MAX_WAIT_MS / 1000}s)`,
+          );
+          await this.prisma.channel.update({
+            where: { id: session.channelId },
+            data: { status: 'ERROR' },
+          }).catch(() => {});
+        }
+      }
+    };
+
+    setTimeout(check, POLL_MS);
   }
 
   // ─── Buscar playlist activa ────────────────────────────────────

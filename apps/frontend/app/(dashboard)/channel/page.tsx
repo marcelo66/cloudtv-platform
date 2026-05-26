@@ -439,7 +439,8 @@ export default function ChannelPage() {
                 <div className="aspect-video bg-black relative">
                   <HlsPlayer
                     src={`/api/playout/${channel.id}/hls/index.m3u8`}
-                    active={isLive || isStarting}
+                    active={isLive}
+                    starting={isStarting}
                   />
                   {/* LIVE badge */}
                   {isLive && (
