@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Radio,
   Play,
@@ -14,11 +14,14 @@ import {
   AlertTriangle,
   CalendarClock,
   ChevronDown,
+  ChevronRight,
   Trash2,
   Save,
   Tv,
+  Terminal,
 } from 'lucide-react';
 import { Header } from '@/components/dashboard/Header';
+import apiClient from '@/lib/api-client';
 import { HlsPlayer } from '@/components/channel/HlsPlayer';
 import {
   useChannels,
@@ -522,11 +525,13 @@ export default function ChannelPage() {
                 <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg bg-yellow-500/5 border border-yellow-500/10">
                   <AlertTriangle className="w-3.5 h-3.5 text-yellow-500/60 flex-shrink-0 mt-0.5" />
                   <p className="text-xs text-slate-500">
-                    No compartas tu stream key. Quienquiera que la tenga puede transmitir a tu
-                    canal.
+                    No compartas tu stream key. Quienquiera que la tenga puede transmitir a tu canal.
                   </p>
                 </div>
               </div>
+
+              {/* Playout logs */}
+              <PlayoutLogs channelId={channel.id} active={isLive || isStarting} />
             </div>
           </div>
         ) : (
@@ -629,6 +634,82 @@ export default function ChannelPage() {
           onCancel={() => setConfirmDelete(false)}
           isPending={del.isPending}
         />
+      )}
+    </div>
+  );
+}
+
+// ─── Playout logs panel ───────────────────────────────────────────────────────
+
+function PlayoutLogs({ channelId, active }: { channelId: string; active: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [logs, setLogs] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const logsEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open || !active) return;
+    let cancelled = false;
+
+    const fetchLogs = async () => {
+      setLoading(true);
+      try {
+        const { data } = await apiClient.get(`/playout/${channelId}/logs`);
+        if (!cancelled) setLogs(data.logs ?? []);
+      } catch { /* ignorar */ } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    fetchLogs();
+    const interval = setInterval(fetchLogs, 3000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [open, active, channelId]);
+
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [logs]);
+
+  if (!active) return null;
+
+  return (
+    <div className="glass-card overflow-hidden">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center gap-2 px-4 py-3 text-xs font-medium text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
+      >
+        {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+        <Terminal className="w-3.5 h-3.5" />
+        Logs de playout (FFmpeg)
+        {loading && <span className="ml-auto text-slate-600">actualizando...</span>}
+      </button>
+
+      {open && (
+        <div className="border-t border-white/10 bg-black/40 p-3 max-h-64 overflow-y-auto font-mono">
+          {logs.length === 0 ? (
+            <p className="text-xs text-slate-600">Sin logs disponibles aún...</p>
+          ) : (
+            logs.map((line, i) => {
+              const isError = /error|ERROR|failed|FAILED/i.test(line);
+              const isWarn  = /warn|WARN|timeout|TIMEOUT/i.test(line);
+              const isOk    = /✓|LIVE_PLAYLIST|listo/i.test(line);
+              return (
+                <div
+                  key={i}
+                  className={
+                    isError ? 'text-red-400 text-xs leading-5' :
+                    isWarn  ? 'text-yellow-400 text-xs leading-5' :
+                    isOk    ? 'text-green-400 text-xs leading-5' :
+                              'text-slate-400 text-xs leading-5'
+                  }
+                >
+                  {line}
+                </div>
+              );
+            })
+          )}
+          <div ref={logsEndRef} />
+        </div>
       )}
     </div>
   );
