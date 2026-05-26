@@ -78,6 +78,28 @@ export class ChannelsService {
     });
   }
 
+  async startChannel(channelId: string, userId: string) {
+    await this.ensureOwnership(channelId, userId);
+    return this.prisma.channel.update({
+      where: { id: channelId },
+      data: { status: 'LIVE_PLAYLIST' },
+    });
+  }
+
+  async stopChannel(channelId: string, userId: string) {
+    await this.ensureOwnership(channelId, userId);
+    return this.prisma.channel.update({
+      where: { id: channelId },
+      data: { status: 'OFFLINE' },
+    });
+  }
+
+  async remove(channelId: string, userId: string) {
+    await this.ensureOwnership(channelId, userId);
+    await this.prisma.channel.delete({ where: { id: channelId } });
+    return { success: true };
+  }
+
   async getDashboardStats(userId: string) {
     const channels = await this.prisma.channel.findMany({
       where: { userId },
