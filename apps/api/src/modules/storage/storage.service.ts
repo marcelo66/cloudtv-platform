@@ -11,6 +11,9 @@ import {
   AbortMultipartUploadCommand,
   HeadObjectCommand,
   DeleteObjectsCommand,
+  CreateBucketCommand,
+  HeadBucketCommand,
+  PutBucketPolicyCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Readable } from 'stream';
@@ -31,7 +34,7 @@ export class StorageService implements OnModuleInit {
 
   constructor(private config: ConfigService) {}
 
-  onModuleInit() {
+  async onModuleInit() {
     const accountId = this.config.get('R2_ACCOUNT_ID');
     const endpoint =
       this.config.get('R2_ENDPOINT') ||
@@ -60,6 +63,40 @@ export class StorageService implements OnModuleInit {
     );
 
     this.logger.log(`Storage initialized → endpoint: ${endpoint}, bucket: ${this.bucket}`);
+
+    // Crear el bucket automáticamente si no existe
+    await this.ensureBucketExists();
+  }
+
+  private async ensureBucketExists(): Promise<void> {
+    try {
+      await this.s3.send(new HeadBucketCommand({ Bucket: this.bucket }));
+      this.logger.log(`Bucket "${this.bucket}" ya existe`);
+    } catch {
+      try {
+        await this.s3.send(new CreateBucketCommand({ Bucket: this.bucket }));
+        this.logger.log(`Bucket "${this.bucket}" creado`);
+
+        // Política pública de lectura (para servir thumbnails y videos procesados)
+        const policy = JSON.stringify({
+          Version: '2012-10-17',
+          Statement: [
+            {
+              Effect: 'Allow',
+              Principal: { AWS: ['*'] },
+              Action: ['s3:GetObject'],
+              Resource: [`arn:aws:s3:::${this.bucket}/*`],
+            },
+          ],
+        });
+        await this.s3.send(
+          new PutBucketPolicyCommand({ Bucket: this.bucket, Policy: policy }),
+        );
+        this.logger.log(`Política pública aplicada al bucket "${this.bucket}"`);
+      } catch (err) {
+        this.logger.error(`No se pudo crear el bucket: ${err.message}`);
+      }
+    }
   }
 
   // ─── Upload simple (para thumbnails, logos, etc.) ────────────
