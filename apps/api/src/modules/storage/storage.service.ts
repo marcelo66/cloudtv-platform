@@ -34,6 +34,8 @@ export class StorageService implements OnModuleInit {
 
   constructor(private config: ConfigService) {}
 
+  private endpoint: string;
+
   async onModuleInit() {
     const accountId = this.config.get('R2_ACCOUNT_ID');
     const endpoint =
@@ -41,6 +43,8 @@ export class StorageService implements OnModuleInit {
       (accountId
         ? `https://${accountId}.r2.cloudflarestorage.com`
         : 'http://localhost:9000');
+
+    this.endpoint = endpoint;
 
     this.s3 = new S3Client({
       region: 'auto',
@@ -240,6 +244,11 @@ export class StorageService implements OnModuleInit {
 
   getPublicUrl(key: string): string {
     return `${this.publicUrl.replace(/\/$/, '')}/${key}`;
+  }
+
+  /** URL accesible desde dentro del contenedor (para FFmpeg) */
+  getInternalUrl(key: string): string {
+    return `${this.endpoint.replace(/\/$/, '')}/${this.bucket}/${key}`;
   }
 
   async getPresignedUrl(key: string, expiresIn = 3600): Promise<string> {

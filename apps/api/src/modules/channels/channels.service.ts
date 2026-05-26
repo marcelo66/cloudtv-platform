@@ -7,10 +7,14 @@ import {
 import slugify from 'slugify';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateChannelDto, UpdateChannelDto } from './dto/create-channel.dto';
+import { PlayoutService } from '../playout/playout.service';
 
 @Injectable()
 export class ChannelsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private playout: PlayoutService,
+  ) {}
 
   async create(userId: string, dto: CreateChannelDto) {
     let slug = dto.slug || slugify(dto.name, { lower: true, strict: true });
@@ -79,19 +83,13 @@ export class ChannelsService {
   }
 
   async startChannel(channelId: string, userId: string) {
-    await this.ensureOwnership(channelId, userId);
-    return this.prisma.channel.update({
-      where: { id: channelId },
-      data: { status: 'LIVE_PLAYLIST' },
-    });
+    await this.playout.start(channelId, userId);
+    return this.prisma.channel.findUnique({ where: { id: channelId } });
   }
 
   async stopChannel(channelId: string, userId: string) {
-    await this.ensureOwnership(channelId, userId);
-    return this.prisma.channel.update({
-      where: { id: channelId },
-      data: { status: 'OFFLINE' },
-    });
+    await this.playout.stop(channelId, userId);
+    return this.prisma.channel.findUnique({ where: { id: channelId } });
   }
 
   async remove(channelId: string, userId: string) {

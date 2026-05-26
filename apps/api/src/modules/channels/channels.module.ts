@@ -1,8 +1,10 @@
 import { Module } from '@nestjs/common';
 import { ChannelsController } from './channels.controller';
 import { ChannelsService } from './channels.service';
+import { PlayoutModule } from '../playout/playout.module';
 
 @Module({
+  imports: [PlayoutModule],
   controllers: [ChannelsController],
   providers: [ChannelsService],
   exports: [ChannelsService],

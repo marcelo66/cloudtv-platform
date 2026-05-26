@@ -9,7 +9,6 @@ import {
   Check,
   RefreshCw,
   Settings2,
-  Tv,
   Key,
   ExternalLink,
   AlertTriangle,
@@ -17,8 +16,10 @@ import {
   ChevronDown,
   Trash2,
   Save,
+  Tv,
 } from 'lucide-react';
 import { Header } from '@/components/dashboard/Header';
+import { HlsPlayer } from '@/components/channel/HlsPlayer';
 import {
   useChannels,
   useChannel,
@@ -435,49 +436,22 @@ export default function ChannelPage() {
             <div className="lg:col-span-2 space-y-4">
               {/* Preview */}
               <div className="glass-card overflow-hidden">
-                <div className="aspect-video bg-black flex items-center justify-center relative">
-                  {isLive ? (
-                    <div className="text-center">
-                      {channel.hlsUrl ? (
-                        <video
-                          key={channel.hlsUrl}
-                          src={channel.hlsUrl}
-                          controls
-                          autoPlay
-                          muted
-                          className="absolute inset-0 w-full h-full object-contain"
-                        />
-                      ) : (
-                        <div className="text-center space-y-2">
-                          <div className="w-14 h-14 rounded-2xl bg-green-500/10 border border-green-500/20 flex items-center justify-center mx-auto">
-                            <Radio className="w-7 h-7 text-green-400" />
-                          </div>
-                          <p className="text-sm text-green-400 font-medium">Canal en vivo</p>
-                          <p className="text-xs text-slate-500">
-                            El reproductor HLS estará disponible con el motor de playout.
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="text-center space-y-3">
-                      <div className="w-14 h-14 rounded-2xl bg-surface-600 flex items-center justify-center mx-auto">
-                        <Tv className="w-7 h-7 text-slate-600" />
-                      </div>
-                      <div>
-                        <p className="text-sm font-medium text-slate-400">Canal offline</p>
-                        <p className="text-xs text-slate-600 mt-0.5">
-                          Iniciá la emisión para ver la señal en vivo
-                        </p>
-                      </div>
-                    </div>
-                  )}
-
+                <div className="aspect-video bg-black relative">
+                  <HlsPlayer
+                    src={`/api/playout/${channel.id}/hls/index.m3u8`}
+                    active={isLive || isStarting}
+                  />
                   {/* LIVE badge */}
                   {isLive && (
-                    <div className="absolute top-3 left-3 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-600 text-xs font-bold text-white">
+                    <div className="absolute top-3 left-3 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-600 text-xs font-bold text-white pointer-events-none">
                       <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
                       EN VIVO
+                    </div>
+                  )}
+                  {isStarting && (
+                    <div className="absolute top-3 left-3 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-yellow-600 text-xs font-bold text-white pointer-events-none">
+                      <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+                      INICIANDO
                     </div>
                   )}
                 </div>
