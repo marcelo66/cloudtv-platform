@@ -11,6 +11,10 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY apps/frontend/ .
 ENV NEXT_TELEMETRY_DISABLED=1
+# Declarar el ARG para que Docker lo pase al entorno de build
+# NEXT_PUBLIC_* vars se incrustan en el bundle en tiempo de compilación
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
 RUN pnpm build
 
 FROM node:20-alpine AS runner
