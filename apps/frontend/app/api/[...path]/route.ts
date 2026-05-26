@@ -42,9 +42,18 @@ async function handler(
     );
   }
 
+  // Filtrar headers que el proxy ya maneja internamente.
+  // fetch() descomprime gzip/br automáticamente, así que no reenviar
+  // Content-Encoding ni Transfer-Encoding al browser (causarían doble-decode).
+  const SKIP_HEADERS = new Set([
+    'content-encoding',
+    'transfer-encoding',
+    'content-length', // el body ya fue re-codificado, el largo cambió
+  ]);
+
   const resHeaders = new Headers();
   response.headers.forEach((value, key) => {
-    if (key.toLowerCase() !== 'transfer-encoding') {
+    if (!SKIP_HEADERS.has(key.toLowerCase())) {
       resHeaders.set(key, value);
     }
   });
