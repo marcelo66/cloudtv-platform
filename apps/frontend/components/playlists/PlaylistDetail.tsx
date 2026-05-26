@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { ArrowLeft, Plus, Trash2, Film, GripVertical, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, Film, GripVertical, RefreshCw, Check } from 'lucide-react';
 import { usePlaylist, useAddPlaylistItem, useRemovePlaylistItem } from '@/hooks/usePlaylists';
 import { useVideos } from '@/hooks/useVideos';
 import { formatDuration } from '@/lib/utils';
@@ -27,7 +27,8 @@ export function PlaylistDetail({ playlistId, channelId, onBack }: Props) {
 
   const readyVideos = allVideos.filter((v) => v.status === 'READY');
   const itemVideoIds = new Set(playlist?.items?.map((i) => i.video.id) ?? []);
-  const availableVideos = readyVideos.filter((v) => !itemVideoIds.has(v.id));
+  // Mostrar TODOS los videos ready; marcar los que ya están en la playlist
+  const availableVideos = readyVideos;
 
   if (isLoading) {
     return (
@@ -80,31 +81,38 @@ export function PlaylistDetail({ playlistId, channelId, onBack }: Props) {
             </p>
           ) : (
             <div className="space-y-1.5 max-h-56 overflow-y-auto">
-              {availableVideos.map((video) => (
-                <button
-                  key={video.id}
-                  onClick={() => {
-                    addItem.mutate({ playlistId, videoId: video.id });
-                    setShowAddVideo(false);
-                  }}
-                  className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-white/5 transition-colors text-left"
-                >
-                  <div className="w-12 h-7 rounded bg-surface-600 flex-shrink-0 overflow-hidden flex items-center justify-center">
-                    {video.thumbnailUrl ? (
-                      <img src={video.thumbnailUrl} alt="" className="w-full h-full object-cover" />
-                    ) : (
-                      <Film className="w-3.5 h-3.5 text-slate-600" />
-                    )}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-white truncate">{video.title}</p>
-                    {video.duration && (
-                      <p className="text-xs text-slate-500">{formatDuration(video.duration)}</p>
-                    )}
-                  </div>
-                  <Plus className="w-4 h-4 text-brand-400 flex-shrink-0" />
-                </button>
-              ))}
+              {availableVideos.map((video) => {
+                const alreadyAdded = itemVideoIds.has(video.id);
+                return (
+                  <button
+                    key={video.id}
+                    disabled={alreadyAdded || addItem.isPending}
+                    onClick={() => {
+                      if (alreadyAdded) return;
+                      addItem.mutate({ playlistId, videoId: video.id });
+                    }}
+                    className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-white/5 transition-colors text-left disabled:opacity-60 disabled:cursor-default"
+                  >
+                    <div className="w-12 h-7 rounded bg-surface-600 flex-shrink-0 overflow-hidden flex items-center justify-center">
+                      {video.thumbnailUrl ? (
+                        <img src={video.thumbnailUrl} alt="" className="w-full h-full object-cover" />
+                      ) : (
+                        <Film className="w-3.5 h-3.5 text-slate-600" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-white truncate">{video.title}</p>
+                      {video.duration && (
+                        <p className="text-xs text-slate-500">{formatDuration(video.duration)}</p>
+                      )}
+                    </div>
+                    {alreadyAdded
+                      ? <Check className="w-4 h-4 text-green-400 flex-shrink-0" />
+                      : <Plus className="w-4 h-4 text-brand-400 flex-shrink-0" />
+                    }
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>

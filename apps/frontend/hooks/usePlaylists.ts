@@ -51,6 +51,7 @@ export function usePlaylist(id: string | null) {
       return data;
     },
     enabled: !!id,
+    refetchOnMount: 'always',
   });
 }
 
