@@ -20,12 +20,9 @@ async function bootstrap() {
   app.use(helmet());
   app.use(compression());
 
-  // CORS
+  // CORS — acepta cualquier origen (seguro porque usamos JWT, no cookies)
   app.enableCors({
-    origin: [
-      'http://localhost:3000',
-      configService.get<string>('APP_URL', 'http://localhost'),
-    ],
+    origin: true,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
