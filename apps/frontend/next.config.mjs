@@ -7,7 +7,9 @@ const nextConfig = {
     remotePatterns: [
       { protocol: 'https', hostname: '**.r2.dev' },
       { protocol: 'https', hostname: '**.cloudflare.com' },
+      { protocol: 'https', hostname: '**.easypanel.host' },
       { protocol: 'http', hostname: 'localhost' },
+      { protocol: 'http', hostname: 'minio' },
       { protocol: 'http', hostname: '*' },
     ],
   },
