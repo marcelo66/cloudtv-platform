@@ -38,7 +38,7 @@ export function VideoCard({ video, onUpdate, onDelete }: VideoCardProps) {
     video.status === 'PROCESSING' || video.status === 'PENDING';
 
   return (
-    <div className="group glass-card overflow-hidden hover:border-white/10 transition-all duration-200">
+    <div className="group glass-card hover:border-white/10 transition-all duration-200">
       {/* Thumbnail */}
       <div className="relative aspect-video bg-surface-700 overflow-hidden">
         {video.thumbnailUrl ? (
