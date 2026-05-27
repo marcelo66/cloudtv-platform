@@ -217,45 +217,50 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     this.log(session, `concat.txt listo con ${downloadedCount} videos`);
 
     // 4. FFmpeg
-    //    IMPORTANTE: usar rutas RELATIVAS para segmentos y m3u8 + cwd=hlsDir.
-    //    Si se usan rutas absolutas en -hls_segment_filename, FFmpeg escribe
-    //    esas rutas absolutas dentro del index.m3u8, y el browser intenta
-    //    pedir http://host/tmp/... → 404. Con rutas relativas el m3u8 solo
-    //    contiene "seg00000.ts" que se resuelve correctamente como
-    //    /api/playout/{channelId}/hls/seg00000.ts
-    const preset   = this.config.get('FFMPEG_PRESET', 'veryfast');
-    const m3u8Path = path.join(session.hlsDir, 'index.m3u8'); // para polling
+    //    - Sin -re: procesa tan rápido como el CPU permite (crítico en containers
+    //      con CPU limitado — con -re + 720p el speed era 0.16x → stream inutilizable)
+    //    - ultrafast preset + 854x480: ~20-30x más rápido que veryfast + 720p
+    //    - err_detect ignore_err: tolera errores H.264 AVCC/start-code del concat demuxer
+    //    - aresample=async=1: corrige audio AAC con layouts inusuales (7.1 → 2ch)
+    //    - omit_endlist: no escribe #EXT-X-ENDLIST al terminar → loop correcto
+    //    - hls_start_number_source epoch: seq IDs únicos entre reinicios
+    //    - rutas RELATIVAS + cwd=hlsDir: m3u8 contiene "seg1234567890.ts" no paths absolutos
+    const preset   = this.config.get('FFMPEG_PRESET', 'ultrafast');
+    const scale    = this.config.get('FFMPEG_SCALE', '854:480');
+    const m3u8Path = path.join(session.hlsDir, 'index.m3u8');
 
     const args = [
-      '-loglevel', 'info',
-      '-re',
+      '-loglevel', 'warning',
+      '-err_detect', 'ignore_err',       // tolerar errores de decodificación H.264/AAC
       '-f', 'concat',
       '-safe', '0',
-      '-i', concatPath,           // absolute path OK para -i
-      '-vf', 'scale=1280:720,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,fps=25',
+      '-i', concatPath,
+      '-vf', `scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,fps=25`,
       '-c:v', 'libx264',
       '-preset', preset,
-      '-crf', '23',
-      '-b:v', '2000k',
-      '-maxrate', '2500k',
-      '-bufsize', '4000k',
+      '-crf', '26',
+      '-b:v', '1000k',
+      '-maxrate', '1200k',
+      '-bufsize', '2000k',
       '-g', '50',
       '-sc_threshold', '0',
       '-c:a', 'aac',
-      '-b:a', '128k',
-      '-ar', '48000',
+      '-b:a', '96k',
+      '-ar', '44100',
       '-ac', '2',
+      '-af', 'aresample=async=1',        // corrige audio con channel layouts inusuales
       '-f', 'hls',
       '-hls_time', '4',
       '-hls_list_size', '10',
-      '-hls_flags', 'delete_segments+append_list+independent_segments',
+      '-hls_flags', 'delete_segments+append_list+independent_segments+omit_endlist',
+      '-hls_start_number_source', 'epoch', // seq IDs únicos entre reinicios
       '-hls_segment_type', 'mpegts',
-      '-hls_segment_filename', 'seg%05d.ts',  // relativo → cwd
+      '-hls_segment_filename', 'seg%d.ts', // %d para acomodar epoch timestamp largo
       '-y',
-      'index.m3u8',                            // relativo → cwd
+      'index.m3u8',
     ];
 
-    this.log(session, `Lanzando FFmpeg cwd=${session.hlsDir}...`);
+    this.log(session, `Lanzando FFmpeg preset=${preset} scale=${scale} cwd=${session.hlsDir}...`);
     const proc = spawn('ffmpeg', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       cwd: session.hlsDir,   // FFmpeg escribe archivos aquí con rutas relativas
