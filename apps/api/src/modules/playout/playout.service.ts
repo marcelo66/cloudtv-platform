@@ -310,15 +310,19 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       '-y', 'index.m3u8',
     ];
 
+    // -stream_loop -1 hace que FFmpeg repita el concat infinitamente (24/7)
+    // sin esto FFmpeg termina al agotar los archivos y sale con code=0
     const args: string[] = !overlayFilter
       ? [
           '-loglevel', 'warning',
+          '-stream_loop', '-1',
           '-f', 'concat', '-safe', '0', '-i', concatPath,
           '-c', 'copy',
           ...hlsArgs,
         ]
       : [
           '-loglevel', 'warning',
+          '-stream_loop', '-1',
           '-f', 'concat', '-safe', '0', '-i', concatPath,
           ...overlayFilter.extraInputArgs,
           '-filter_complex', overlayFilter.filterComplex,
@@ -364,10 +368,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
       if (session.stopping) return;
 
-      const isRapidExit = uptime < 5000;
+      const isCleanExit  = code === 0;
+      const isRapidExit  = uptime < 5000;
 
-      if (isRapidExit && hadOverlays && !session.overlaysDisabled) {
-        // FFmpeg falló de inmediato con overlays → deshabilitar overlays y reintentar
+      // ── Caso 1: falla rápida con overlays activos → overlay fallback ───────
+      if (isRapidExit && !isCleanExit && hadOverlays && !session.overlaysDisabled) {
         session.overlaysDisabled = true;
         this.log(session, 'WARN: Salida rápida con overlays → reintentando sin overlays (posible problema de fuentes/filter_complex)');
         this.stopRtmpOutputs(session, false);
@@ -375,9 +380,21 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
+      // ── Caso 2: salida limpia code=0 (playlist terminó) → reinicio sin fallo
+      // Con -stream_loop -1 esto no debería ocurrir, pero lo manejamos igual
+      if (isCleanExit) {
+        this.log(session, 'Playlist completada (code=0) → reiniciando en 1s...');
+        this.stopRtmpOutputs(session, false);
+        setTimeout(() => this.launchFfmpeg(session), 1000);
+        return;
+      }
+
+      // ── Caso 3: fallo real (code≠0) ────────────────────────────────────────
       session.restarts++;
       if (session.restarts >= MAX_RESTARTS) {
         this.log(session, `ERROR: Máximo de reinicios (${MAX_RESTARTS}) alcanzado → canal en ERROR. Revisá los logs para diagnosticar.`);
+        // Marcar stopping para cancelar polls pendientes de waitForM3u8
+        session.stopping = true;
         this.prisma.channel.update({
           where: { id: session.channelId },
           data: { status: 'ERROR' },

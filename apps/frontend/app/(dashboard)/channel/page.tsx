@@ -11,7 +11,6 @@ import {
   Settings2,
   Key,
   ExternalLink,
-  AlertTriangle,
   CalendarClock,
   ChevronDown,
   ChevronRight,
@@ -185,8 +184,6 @@ export default function ChannelPage() {
   const maskedKey = channel?.streamKey
     ? channel.streamKey.slice(0, 10) + '••••••••••••'
     : '••••••••••••••••••••';
-
-  const RTMP_URL = 'rtmp://live.cloudtv.io/stream';
 
   // ─── Loading ─────────────────────────────────────────────────
 
@@ -473,66 +470,64 @@ export default function ChannelPage() {
                 <div className="flex items-center gap-2 mb-1">
                   <Key className="w-4 h-4 text-slate-400" />
                   <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-                    Credenciales de stream
+                    Salida del canal
                   </span>
                 </div>
 
-                {/* RTMP URL */}
-                <div className="flex items-center gap-2 px-3 py-2.5 rounded-lg bg-surface-700/50">
-                  <span className="text-xs text-slate-500 w-24 flex-shrink-0">RTMP URL</span>
-                  <span className="text-xs text-slate-300 font-mono flex-1 truncate">
-                    {RTMP_URL}
-                  </span>
-                  <CopyBtn text={RTMP_URL} label="URL RTMP" />
+                {/* HLS URL — principal */}
+                <div className="space-y-1">
+                  <p className="text-xs text-slate-500 px-1">URL de reproducción HLS</p>
+                  <div className="flex items-center gap-2 px-3 py-2.5 rounded-lg bg-surface-700/50">
+                    <span className="text-xs text-slate-300 font-mono flex-1 truncate">
+                      {channel.hlsUrl
+                        ? channel.hlsUrl
+                        : <span className="text-slate-600">Disponible al iniciar el canal</span>}
+                    </span>
+                    {channel.hlsUrl && (
+                      <>
+                        <CopyBtn text={channel.hlsUrl} label="URL HLS" />
+                        <a
+                          href={channel.hlsUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="p-1.5 rounded text-slate-500 hover:text-slate-300 transition-colors flex-shrink-0"
+                          title="Abrir en nueva pestaña"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                        </a>
+                      </>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-600 px-1">
+                    Usá esta URL en VLC, OBS (fuente media) o cualquier reproductor compatible con HLS.
+                  </p>
                 </div>
 
                 {/* Stream Key */}
-                <div className="flex items-center gap-2 px-3 py-2.5 rounded-lg bg-surface-700/50">
-                  <span className="text-xs text-slate-500 w-24 flex-shrink-0">Stream Key</span>
-                  <span
-                    className="text-xs text-slate-300 font-mono flex-1 truncate cursor-pointer select-none"
-                    onClick={() => setShowFullKey((v) => !v)}
-                    title="Clic para mostrar/ocultar"
-                  >
-                    {showFullKey ? channel.streamKey : maskedKey}
-                  </span>
-                  <CopyBtn text={channel.streamKey} label="Stream key" />
-                  <button
-                    onClick={handleRegenKey}
-                    disabled={regen.isPending}
-                    className="p-1.5 rounded text-slate-500 hover:text-yellow-400 transition-colors flex-shrink-0"
-                    title="Regenerar stream key"
-                  >
-                    <RefreshCw
-                      className={cn('w-3.5 h-3.5', regen.isPending && 'animate-spin')}
-                    />
-                  </button>
-                </div>
-
-                {/* HLS URL */}
-                {channel.hlsUrl && (
+                <div className="space-y-1">
+                  <p className="text-xs text-slate-500 px-1">Stream Key de canal</p>
                   <div className="flex items-center gap-2 px-3 py-2.5 rounded-lg bg-surface-700/50">
-                    <span className="text-xs text-slate-500 w-24 flex-shrink-0">HLS URL</span>
-                    <span className="text-xs text-slate-300 font-mono flex-1 truncate">
-                      {channel.hlsUrl}
-                    </span>
-                    <CopyBtn text={channel.hlsUrl} label="URL HLS" />
-                    <a
-                      href={channel.hlsUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="p-1.5 rounded text-slate-500 hover:text-slate-300 transition-colors flex-shrink-0"
+                    <span
+                      className="text-xs text-slate-300 font-mono flex-1 truncate cursor-pointer select-none"
+                      onClick={() => setShowFullKey((v) => !v)}
+                      title="Clic para mostrar/ocultar"
                     >
-                      <ExternalLink className="w-3.5 h-3.5" />
-                    </a>
+                      {showFullKey ? channel.streamKey : maskedKey}
+                    </span>
+                    <CopyBtn text={channel.streamKey} label="Stream key" />
+                    <button
+                      onClick={handleRegenKey}
+                      disabled={regen.isPending}
+                      className="p-1.5 rounded text-slate-500 hover:text-yellow-400 transition-colors flex-shrink-0"
+                      title="Regenerar stream key"
+                    >
+                      <RefreshCw
+                        className={cn('w-3.5 h-3.5', regen.isPending && 'animate-spin')}
+                      />
+                    </button>
                   </div>
-                )}
-
-                {/* Warning */}
-                <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg bg-yellow-500/5 border border-yellow-500/10">
-                  <AlertTriangle className="w-3.5 h-3.5 text-yellow-500/60 flex-shrink-0 mt-0.5" />
-                  <p className="text-xs text-slate-500">
-                    No compartas tu stream key. Quienquiera que la tenga puede transmitir a tu canal.
+                  <p className="text-xs text-slate-600 px-1">
+                    Clave de autenticación de la API. No la compartas.
                   </p>
                 </div>
               </div>
