@@ -197,16 +197,21 @@ export class PlayoutService implements OnModuleDestroy {
     this.log(session, `concat.txt listo con ${downloadedCount} videos`);
 
     // 4. FFmpeg
-    const preset  = this.config.get('FFMPEG_PRESET', 'veryfast');
-    const segPat  = path.join(session.hlsDir, 'seg%05d.ts');
-    const m3u8    = path.join(session.hlsDir, 'index.m3u8');
+    //    IMPORTANTE: usar rutas RELATIVAS para segmentos y m3u8 + cwd=hlsDir.
+    //    Si se usan rutas absolutas en -hls_segment_filename, FFmpeg escribe
+    //    esas rutas absolutas dentro del index.m3u8, y el browser intenta
+    //    pedir http://host/tmp/... → 404. Con rutas relativas el m3u8 solo
+    //    contiene "seg00000.ts" que se resuelve correctamente como
+    //    /api/playout/{channelId}/hls/seg00000.ts
+    const preset   = this.config.get('FFMPEG_PRESET', 'veryfast');
+    const m3u8Path = path.join(session.hlsDir, 'index.m3u8'); // para polling
 
     const args = [
       '-loglevel', 'info',
       '-re',
       '-f', 'concat',
       '-safe', '0',
-      '-i', concatPath,
+      '-i', concatPath,           // absolute path OK para -i
       '-vf', 'scale=1280:720,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,fps=25',
       '-c:v', 'libx264',
       '-preset', preset,
@@ -225,13 +230,16 @@ export class PlayoutService implements OnModuleDestroy {
       '-hls_list_size', '10',
       '-hls_flags', 'delete_segments+append_list+independent_segments',
       '-hls_segment_type', 'mpegts',
-      '-hls_segment_filename', segPat,
+      '-hls_segment_filename', 'seg%05d.ts',  // relativo → cwd
       '-y',
-      m3u8,
+      'index.m3u8',                            // relativo → cwd
     ];
 
-    this.log(session, `Lanzando FFmpeg (${args.length} args)...`);
-    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    this.log(session, `Lanzando FFmpeg cwd=${session.hlsDir}...`);
+    const proc = spawn('ffmpeg', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: session.hlsDir,   // FFmpeg escribe archivos aquí con rutas relativas
+    });
     session.process = proc;
 
     proc.stderr.on('data', (chunk: Buffer) => {
@@ -243,7 +251,7 @@ export class PlayoutService implements OnModuleDestroy {
 
     proc.on('spawn', () => {
       this.log(session, `FFmpeg PID=${proc.pid} en marcha. Esperando index.m3u8...`);
-      this.waitForM3u8(session, m3u8);
+      this.waitForM3u8(session, m3u8Path);
     });
 
     proc.on('close', (code, sig) => {
