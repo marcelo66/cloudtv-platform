@@ -26,12 +26,17 @@ interface PlayoutSession {
   restarts: number;
   /** outputId → proceso FFmpeg de re-streaming RTMP */
   rtmpProcs: Map<string, ChildProcess>;
+  /** true → omitir overlays aunque estén configurados (fallback por falla rápida) */
+  overlaysDisabled: boolean;
+  /** Incrementa con cada nuevo lanzamiento FFmpeg para cancelar polls anteriores */
+  pollToken: number;
 }
 
-const HLS_BASE   = path.join('/tmp', 'cloudtv-hls');
-const MAX_LOGS   = 300;
-const FONT       = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf';
-const FONT_BOLD  = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
+const HLS_BASE    = path.join('/tmp', 'cloudtv-hls');
+const MAX_LOGS    = 300;
+const MAX_RESTARTS = 5;
+const FONT        = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf';
+const FONT_BOLD   = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
 
 /** URL base RTMP de cada plataforma conocida. */
 const RTMP_BASE: Record<string, string> = {
@@ -104,6 +109,8 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       recentLogs: [],
       restarts: 0,
       rtmpProcs: new Map(),
+      overlaysDisabled: false,
+      pollToken: 0,
     };
     this.sessions.set(channelId, session);
 
@@ -184,6 +191,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
   private async launchFfmpeg(session: PlayoutSession): Promise<void> {
     if (session.stopping) return;
+
+    // Cancelar cualquier waitForM3u8 anterior
+    session.pollToken++;
+    const myPollToken = session.pollToken;
 
     // 1. Playlist activa
     const playlist = await this.getActivePlaylist(session.channelId);
@@ -268,7 +279,16 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
     // 5. Overlays
     const overlays = await this.overlaysService.getEnabledForChannel(session.channelId);
-    const overlayFilter = overlays.length > 0
+    const fontsOk   = await this.checkFontsAvailable();
+
+    if (overlays.length > 0 && !fontsOk) {
+      this.log(session, 'WARN: Fuentes DejaVu no encontradas → overlays de texto desactivados. Instalar fonts-dejavu-core y hacer Deploy (no solo Restart).');
+    }
+    if (overlays.length > 0 && session.overlaysDisabled) {
+      this.log(session, 'WARN: Overlays desactivados por falla previa → emitiendo sin overlays');
+    }
+
+    const overlayFilter = (overlays.length > 0 && !session.overlaysDisabled && fontsOk)
       ? await this.buildOverlayFilter(session, overlays)
       : null;
 
@@ -315,6 +335,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
     this.log(session, `Lanzando FFmpeg HLS${overlayFilter ? ' + overlays' : ' (copy)'}...`);
 
+    let spawnedAt = Date.now(); // se ajusta en el evento 'spawn'
+    const hadOverlays = !!overlayFilter;
+
     const proc = spawn('ffmpeg', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       cwd: session.hlsDir,
@@ -329,20 +352,42 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     });
 
     proc.on('spawn', () => {
+      spawnedAt = Date.now();
       this.log(session, `FFmpeg PID=${proc.pid}. Esperando index.m3u8...`);
-      this.waitForM3u8(session, m3u8Path);
+      this.waitForM3u8(session, m3u8Path, myPollToken);
     });
 
     proc.on('close', (code, sig) => {
-      this.log(session, `FFmpeg terminó (code=${code} sig=${sig})`);
+      const uptime = Date.now() - spawnedAt;
+      this.log(session, `FFmpeg terminó (code=${code} sig=${sig} uptime=${uptime}ms)`);
       session.process = null;
-      if (!session.stopping) {
-        session.restarts++;
-        this.log(session, `Loop: reinicio #${session.restarts} en 3s...`);
-        // Detener RTMP outputs antes de reiniciar
+
+      if (session.stopping) return;
+
+      const isRapidExit = uptime < 5000;
+
+      if (isRapidExit && hadOverlays && !session.overlaysDisabled) {
+        // FFmpeg falló de inmediato con overlays → deshabilitar overlays y reintentar
+        session.overlaysDisabled = true;
+        this.log(session, 'WARN: Salida rápida con overlays → reintentando sin overlays (posible problema de fuentes/filter_complex)');
         this.stopRtmpOutputs(session, false);
-        setTimeout(() => this.launchFfmpeg(session), 3000);
+        setTimeout(() => this.launchFfmpeg(session), 2000);
+        return;
       }
+
+      session.restarts++;
+      if (session.restarts >= MAX_RESTARTS) {
+        this.log(session, `ERROR: Máximo de reinicios (${MAX_RESTARTS}) alcanzado → canal en ERROR. Revisá los logs para diagnosticar.`);
+        this.prisma.channel.update({
+          where: { id: session.channelId },
+          data: { status: 'ERROR' },
+        }).catch(() => {});
+        return;
+      }
+
+      this.log(session, `Loop: reinicio #${session.restarts}/${MAX_RESTARTS} en 3s...`);
+      this.stopRtmpOutputs(session, false);
+      setTimeout(() => this.launchFfmpeg(session), 3000);
     });
 
     proc.on('error', async (err) => {
@@ -358,16 +403,18 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
   // ─── Polling m3u8 ──────────────────────────────────────────────
 
-  private waitForM3u8(session: PlayoutSession, m3u8Path: string) {
+  private waitForM3u8(session: PlayoutSession, m3u8Path: string, token: number) {
     const MAX_MS  = 120_000;
     const POLL_MS = 2_000;
     const t0 = Date.now();
 
     const check = async () => {
+      // Cancelado porque se lanzó un nuevo proceso FFmpeg
+      if (session.pollToken !== token) return;
       if (session.stopping) return;
       try {
         await fs.access(m3u8Path);
-        if (!session.stopping) {
+        if (!session.stopping && session.pollToken === token) {
           await this.prisma.channel.update({
             where: { id: session.channelId },
             data: { status: 'LIVE_PLAYLIST' },
@@ -382,6 +429,8 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         if (Date.now() - t0 < MAX_MS) {
           setTimeout(check, POLL_MS);
         } else {
+          // Sólo actuar si este poll sigue siendo el vigente
+          if (session.pollToken !== token) return;
           this.log(session, `TIMEOUT ${MAX_MS / 1000}s esperando index.m3u8`);
           await this.prisma.channel.update({
             where: { id: session.channelId },
@@ -480,6 +529,18 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
   private buildRtmpTarget(output: StreamOutput): string {
     const base = (output.rtmpUrl?.trim() || RTMP_BASE[output.platform] || '').replace(/\/$/, '');
     return output.streamKey ? `${base}/${output.streamKey}` : base;
+  }
+
+  // ─── Font check ────────────────────────────────────────────────
+
+  private async checkFontsAvailable(): Promise<boolean> {
+    try {
+      await fs.access(FONT);
+      await fs.access(FONT_BOLD);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   // ─── Overlay filter_complex ────────────────────────────────────

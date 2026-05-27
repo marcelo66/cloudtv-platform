@@ -538,7 +538,10 @@ export default function ChannelPage() {
               </div>
 
               {/* Playout logs */}
-              <PlayoutLogs channelId={channel.id} active={isLive || isStarting} />
+              <PlayoutLogs
+                channelId={channel.id}
+                active={isLive || isStarting || channel.status === 'ERROR'}
+              />
             </div>
           </div>
         ) : (
@@ -653,6 +656,13 @@ function PlayoutLogs({ channelId, active }: { channelId: string; active: boolean
   const [logs, setLogs] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const prevActive = useRef(false);
+
+  // Abrir automáticamente cuando el canal pasa de inactivo a activo
+  useEffect(() => {
+    if (active && !prevActive.current) setOpen(true);
+    prevActive.current = active;
+  }, [active]);
 
   useEffect(() => {
     if (!open || !active) return;
