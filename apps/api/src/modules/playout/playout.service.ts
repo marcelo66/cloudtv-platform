@@ -162,108 +162,120 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       });
       return;
     }
-
     this.log(session, `Playlist: "${playlist.name}" — ${playlist.items.length} video(s)`);
 
-    // 2. Descargar videos a disco local
-    //    Esto garantiza que FFmpeg lea archivos locales, sin problemas de
-    //    red/auth/URL-encoding con MinIO.
+    // 2. Descargar MP4 de MinIO → disco local
     const videosDir = path.join(session.hlsDir, 'videos');
     await fs.mkdir(videosDir, { recursive: true });
 
-    const lines: string[] = [];
-    let downloadedCount = 0;
+    const downloadedMp4s: string[] = [];
 
     for (let i = 0; i < playlist.items.length; i++) {
       if (session.stopping) return;
-
       const item = playlist.items[i];
       const key = item.video.processedKey ?? item.video.originalKey;
       if (!key) {
         this.log(session, `  WARN: video ${item.video.id} sin key, omitiendo`);
         continue;
       }
-
-      const localPath = path.join(videosDir, `${String(i).padStart(4, '0')}.mp4`);
+      const mp4Path = path.join(videosDir, `${String(i).padStart(4, '0')}.mp4`);
       this.log(session, `  Descargando ${i + 1}/${playlist.items.length}: ${key}`);
-
       try {
-        await this.storage.downloadToFile(key, localPath);
-        downloadedCount++;
-        lines.push(`file '${localPath}'`);
-        if (item.video.duration) {
-          lines.push(`duration ${item.video.duration.toFixed(3)}`);
-        }
-        this.log(session, `  ✓ ${path.basename(localPath)} (${item.video.duration?.toFixed(1) ?? '?'}s)`);
+        await this.storage.downloadToFile(key, mp4Path);
+        downloadedMp4s.push(mp4Path);
+        this.log(session, `  ✓ ${path.basename(mp4Path)} (${item.video.duration?.toFixed(1) ?? '?'}s)`);
       } catch (err: any) {
         this.log(session, `  ERROR descargando ${key}: ${err.message}`);
       }
     }
 
-    if (downloadedCount === 0) {
+    if (downloadedMp4s.length === 0) {
       this.log(session, 'ERROR: No se pudo descargar ningún video.');
-      await this.prisma.channel.update({
-        where: { id: session.channelId },
-        data: { status: 'ERROR' },
-      });
+      await this.prisma.channel.update({ where: { id: session.channelId }, data: { status: 'ERROR' } });
       return;
     }
-
     if (session.stopping) return;
 
-    // 3. Concat.txt con rutas locales
-    const concatPath = path.join(session.hlsDir, 'concat.txt');
-    await fs.writeFile(concatPath, lines.join('\n') + '\n');
-    this.log(session, `concat.txt listo con ${downloadedCount} videos`);
+    // 3. Preprocesar cada MP4 → MPEG-TS normalizado
+    //    Esto resuelve los 3 problemas del concat demuxer con MP4:
+    //    a) h264_mp4toannexb: convierte H.264 AVCC→AnnexB (fix "No start code")
+    //    b) -ac 2 -ar 44100: fuerza audio stereo (fix "channel element 1.6")
+    //    c) -f mpegts: timestamps continuos (fix "DTS out of order" entre archivos)
+    const tsFiles: string[] = [];
+    const scale = this.config.get('FFMPEG_SCALE', '854:480');
 
-    // 4. FFmpeg
-    //    - Sin -re: procesa tan rápido como el CPU permite (crítico en containers
-    //      con CPU limitado — con -re + 720p el speed era 0.16x → stream inutilizable)
-    //    - ultrafast preset + 854x480: ~20-30x más rápido que veryfast + 720p
-    //    - err_detect ignore_err: tolera errores H.264 AVCC/start-code del concat demuxer
-    //    - aresample=async=1: corrige audio AAC con layouts inusuales (7.1 → 2ch)
-    //    - omit_endlist: no escribe #EXT-X-ENDLIST al terminar → loop correcto
-    //    - hls_start_number_source epoch: seq IDs únicos entre reinicios
-    //    - rutas RELATIVAS + cwd=hlsDir: m3u8 contiene "seg1234567890.ts" no paths absolutos
-    const preset   = this.config.get('FFMPEG_PRESET', 'ultrafast');
-    const scale    = this.config.get('FFMPEG_SCALE', '854:480');
+    for (let i = 0; i < downloadedMp4s.length; i++) {
+      if (session.stopping) return;
+      const mp4Path = downloadedMp4s[i];
+      const tsPath  = mp4Path.replace('.mp4', '.ts');
+      this.log(session, `  Normalizando ${i + 1}/${downloadedMp4s.length} → ${path.basename(tsPath)}`);
+      try {
+        await this.runFfmpegSync([
+          '-loglevel', 'error',
+          '-i', mp4Path,
+          '-vf', `scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,fps=25,format=yuv420p`,
+          '-c:v', 'libx264',
+          '-preset', this.config.get('FFMPEG_PRESET', 'ultrafast'),
+          '-crf', '26',
+          '-b:v', '1000k',
+          '-maxrate', '1200k',
+          '-bufsize', '2000k',
+          '-g', '50',
+          '-sc_threshold', '0',
+          '-c:a', 'aac',
+          '-b:a', '96k',
+          '-ar', '44100',
+          '-ac', '2',
+          '-f', 'mpegts',
+          '-y', tsPath,
+        ]);
+        tsFiles.push(tsPath);
+        this.log(session, `  ✓ normalizado: ${path.basename(tsPath)}`);
+      } catch (err: any) {
+        this.log(session, `  ERROR normalizando ${path.basename(mp4Path)}: ${err.message}`);
+      }
+    }
+
+    if (tsFiles.length === 0) {
+      this.log(session, 'ERROR: No se pudo normalizar ningún video.');
+      await this.prisma.channel.update({ where: { id: session.channelId }, data: { status: 'ERROR' } });
+      return;
+    }
+    if (session.stopping) return;
+
+    // 4. Concat.txt con los MPEG-TS ya normalizados
+    const concatPath = path.join(session.hlsDir, 'concat.txt');
+    const concatLines = tsFiles.map(f => `file '${f}'`);
+    await fs.writeFile(concatPath, concatLines.join('\n') + '\n');
+    this.log(session, `concat.txt listo con ${tsFiles.length} archivos .ts`);
+
+    // 5. FFmpeg principal: concat TS → HLS con stream copy (sin re-encoding)
+    //    Los .ts ya están normalizados, solo hay que segmentar.
+    //    omit_endlist: playlist no cierra → loop seamless al reiniciar
+    //    epoch: segment IDs únicos entre reinicios → hls.js no confunde segmentos viejos
     const m3u8Path = path.join(session.hlsDir, 'index.m3u8');
 
     const args = [
       '-loglevel', 'warning',
-      '-err_detect', 'ignore_err',       // tolerar errores de decodificación H.264/AAC
       '-f', 'concat',
       '-safe', '0',
       '-i', concatPath,
-      '-vf', `scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,fps=25`,
-      '-c:v', 'libx264',
-      '-preset', preset,
-      '-crf', '26',
-      '-b:v', '1000k',
-      '-maxrate', '1200k',
-      '-bufsize', '2000k',
-      '-g', '50',
-      '-sc_threshold', '0',
-      '-c:a', 'aac',
-      '-b:a', '96k',
-      '-ar', '44100',
-      '-ac', '2',
-      '-af', 'aresample=async=1',        // corrige audio con channel layouts inusuales
+      '-c', 'copy',           // stream copy: sin re-encoding (ultra rápido)
       '-f', 'hls',
       '-hls_time', '4',
       '-hls_list_size', '10',
       '-hls_flags', 'delete_segments+append_list+independent_segments+omit_endlist',
-      '-hls_start_number_source', 'epoch', // seq IDs únicos entre reinicios
+      '-hls_start_number_source', 'epoch',
       '-hls_segment_type', 'mpegts',
-      '-hls_segment_filename', 'seg%d.ts', // %d para acomodar epoch timestamp largo
+      '-hls_segment_filename', 'seg%d.ts',
       '-y',
       'index.m3u8',
     ];
 
-    this.log(session, `Lanzando FFmpeg preset=${preset} scale=${scale} cwd=${session.hlsDir}...`);
+    this.log(session, `Lanzando FFmpeg HLS (copy mode)...`);
     const proc = spawn('ffmpeg', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      cwd: session.hlsDir,   // FFmpeg escribe archivos aquí con rutas relativas
+      cwd: session.hlsDir,
     });
     session.process = proc;
 
@@ -285,7 +297,6 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       if (!session.stopping) {
         session.restarts++;
         this.log(session, `Loop: reinicio #${session.restarts} en 3s...`);
-        // Volver a descargar/lanzar (por si la playlist cambió)
         setTimeout(() => this.launchFfmpeg(session), 3000);
       }
     });
@@ -298,6 +309,23 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           data: { status: 'ERROR' },
         }).catch(() => {});
       }
+    });
+  }
+
+  // ─── Ejecutar FFmpeg sincrónico (preproceso) ───────────────────
+
+  private runFfmpegSync(args: string[]): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+      const errLines: string[] = [];
+      proc.stderr.on('data', (b: Buffer) =>
+        b.toString().split('\n').forEach(l => { if (l.trim()) errLines.push(l.trim()); })
+      );
+      proc.on('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(errLines.slice(-5).join(' | ') || `exit ${code}`));
+      });
+      proc.on('error', reject);
     });
   }
 
