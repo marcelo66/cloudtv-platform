@@ -2,6 +2,7 @@ import {
   Injectable,
   Logger,
   OnModuleDestroy,
+  OnModuleInit,
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -26,7 +27,7 @@ const HLS_BASE = path.join('/tmp', 'cloudtv-hls');
 const MAX_LOGS = 300;
 
 @Injectable()
-export class PlayoutService implements OnModuleDestroy {
+export class PlayoutService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PlayoutService.name);
   private sessions = new Map<string, PlayoutSession>();
 
@@ -35,6 +36,25 @@ export class PlayoutService implements OnModuleDestroy {
     private storage: StorageService,
     private config: ConfigService,
   ) {}
+
+  /**
+   * Al iniciar el módulo, cualquier canal que quedó en estado activo
+   * (de un deploy anterior) se resetea a OFFLINE, porque los archivos
+   * HLS en /tmp y los procesos FFmpeg ya no existen.
+   */
+  async onModuleInit() {
+    try {
+      const stale = await this.prisma.channel.updateMany({
+        where: { status: { in: ['STARTING', 'LIVE_PLAYLIST', 'LIVE_RTMP'] } },
+        data: { status: 'OFFLINE', hlsUrl: null },
+      });
+      if (stale.count > 0) {
+        this.logger.log(`Reseteados ${stale.count} canal(es) activos → OFFLINE (redeploy)`);
+      }
+    } catch (err) {
+      this.logger.warn(`No se pudo resetear canales al inicio: ${err.message}`);
+    }
+  }
 
   async onModuleDestroy() {
     for (const session of this.sessions.values()) {
