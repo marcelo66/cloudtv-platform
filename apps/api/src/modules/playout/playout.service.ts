@@ -6,12 +6,14 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { VideoStatus } from '@prisma/client';
+import { VideoStatus, OverlayType } from '@prisma/client';
+import type { Overlay } from '@prisma/client';
 import { spawn, ChildProcess } from 'child_process';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
+import { OverlaysService } from '../overlays/overlays.service';
 
 interface PlayoutSession {
   channelId: string;
@@ -26,6 +28,10 @@ interface PlayoutSession {
 const HLS_BASE = path.join('/tmp', 'cloudtv-hls');
 const MAX_LOGS = 300;
 
+// Fuente monoespaciada instalada con fonts-dejavu-core
+const FONT      = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf';
+const FONT_BOLD = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
+
 @Injectable()
 export class PlayoutService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PlayoutService.name);
@@ -35,6 +41,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     private prisma: PrismaService,
     private storage: StorageService,
     private config: ConfigService,
+    private overlaysService: OverlaysService,
   ) {}
 
   /**
@@ -101,7 +108,6 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
   }
 
   async stop(channelId: string, userId: string): Promise<void> {
-    // Verificar que el canal existe (no que sea LIVE — puede estar en STARTING)
     const channel = await this.prisma.channel.findFirst({
       where: { id: channelId, userId },
     });
@@ -197,10 +203,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     if (session.stopping) return;
 
     // 3. Preprocesar cada MP4 → MPEG-TS normalizado
-    //    Esto resuelve los 3 problemas del concat demuxer con MP4:
-    //    a) h264_mp4toannexb: convierte H.264 AVCC→AnnexB (fix "No start code")
-    //    b) -ac 2 -ar 44100: fuerza audio stereo (fix "channel element 1.6")
-    //    c) -f mpegts: timestamps continuos (fix "DTS out of order" entre archivos)
+    //    Resuelve: H.264 AVCC→AnnexB, audio 7.1→stereo, timestamps DTS continuos
     const tsFiles: string[] = [];
     const scale = this.config.get('FFMPEG_SCALE', '854:480');
 
@@ -243,24 +246,30 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     }
     if (session.stopping) return;
 
-    // 4. Concat.txt con los MPEG-TS ya normalizados
+    // 4. Concat.txt con los MPEG-TS normalizados
     const concatPath = path.join(session.hlsDir, 'concat.txt');
     const concatLines = tsFiles.map(f => `file '${f}'`);
     await fs.writeFile(concatPath, concatLines.join('\n') + '\n');
     this.log(session, `concat.txt listo con ${tsFiles.length} archivos .ts`);
 
-    // 5. FFmpeg principal: concat TS → HLS con stream copy (sin re-encoding)
-    //    Los .ts ya están normalizados, solo hay que segmentar.
-    //    omit_endlist: playlist no cierra → loop seamless al reiniciar
-    //    epoch: segment IDs únicos entre reinicios → hls.js no confunde segmentos viejos
+    // 5. Cargar overlays habilitados para este canal
+    const overlays = await this.overlaysService.getEnabledForChannel(session.channelId);
+    const overlayFilter = overlays.length > 0
+      ? await this.buildOverlayFilter(session, overlays)
+      : null;
+
+    if (overlayFilter) {
+      this.log(session, `Overlays activos: ${overlays.length} → modo filter_complex (re-encode)`);
+    } else {
+      this.log(session, `Sin overlays → modo stream copy (rápido)`);
+    }
+
+    // 6. FFmpeg principal: concat TS → HLS
+    //    omit_endlist: playlist abierta → loop seamless al reiniciar
+    //    epoch: segment IDs únicos entre reinicios
     const m3u8Path = path.join(session.hlsDir, 'index.m3u8');
 
-    const args = [
-      '-loglevel', 'warning',
-      '-f', 'concat',
-      '-safe', '0',
-      '-i', concatPath,
-      '-c', 'copy',           // stream copy: sin re-encoding (ultra rápido)
+    const hlsOutputArgs = [
       '-f', 'hls',
       '-hls_time', '4',
       '-hls_list_size', '10',
@@ -272,7 +281,42 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       'index.m3u8',
     ];
 
-    this.log(session, `Lanzando FFmpeg HLS (copy mode)...`);
+    let args: string[];
+
+    if (!overlayFilter) {
+      // Fast path: sin re-encoding
+      args = [
+        '-loglevel', 'warning',
+        '-f', 'concat', '-safe', '0', '-i', concatPath,
+        '-c', 'copy',
+        ...hlsOutputArgs,
+      ];
+    } else {
+      // Re-encode con overlays via filter_complex
+      args = [
+        '-loglevel', 'warning',
+        '-f', 'concat', '-safe', '0', '-i', concatPath,
+        ...overlayFilter.extraInputArgs,     // -i logo1.png -i logo2.png ...
+        '-filter_complex', overlayFilter.filterComplex,
+        '-map', overlayFilter.videoMapLabel,
+        '-map', '0:a?',
+        '-c:v', 'libx264',
+        '-preset', this.config.get('FFMPEG_PRESET', 'ultrafast'),
+        '-crf', '26',
+        '-b:v', '1000k',
+        '-maxrate', '1200k',
+        '-bufsize', '2000k',
+        '-g', '50',
+        '-sc_threshold', '0',
+        '-c:a', 'aac',
+        '-b:a', '96k',
+        '-ar', '44100',
+        '-ac', '2',
+        ...hlsOutputArgs,
+      ];
+    }
+
+    this.log(session, `Lanzando FFmpeg HLS${overlayFilter ? ' + overlays' : ' (copy)'}...`);
     const proc = spawn('ffmpeg', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       cwd: session.hlsDir,
@@ -310,6 +354,172 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         }).catch(() => {});
       }
     });
+  }
+
+  // ─── Overlay filter_complex builder ────────────────────────────
+
+  private async buildOverlayFilter(
+    session: PlayoutSession,
+    overlays: Overlay[],
+  ): Promise<{ filterComplex: string; extraInputArgs: string[]; videoMapLabel: string } | null> {
+    const enabled = [...overlays]
+      .filter(o => o.enabled)
+      .sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0));
+
+    if (!enabled.length) return null;
+
+    // Descargar logos al disco
+    const logoLocalPaths = new Map<string, string>();
+    for (const ov of enabled) {
+      if (ov.type === OverlayType.LOGO) {
+        const cfg = ov.config as any;
+        if (cfg?.imageKey) {
+          const localPath = path.join(session.hlsDir, `logo_${ov.id}.png`);
+          try {
+            await this.storage.downloadToFile(cfg.imageKey, localPath);
+            logoLocalPaths.set(ov.id, localPath);
+            this.log(session, `  ✓ Logo "${ov.name}" descargado`);
+          } catch (err: any) {
+            this.log(session, `  WARN: Logo "${ov.name}" falló descarga: ${err.message}`);
+          }
+        } else {
+          this.log(session, `  WARN: Logo "${ov.name}" sin imageKey — omitido`);
+        }
+      }
+    }
+
+    const filterParts: string[] = [];
+    const extraInputPaths: string[] = [];
+    let currentStream = '0:v';
+    let idx = 0;
+
+    for (const ov of enabled) {
+      const cfg = ov.config as any;
+      const nextStream = `ov${idx}`;
+
+      if (ov.type === OverlayType.LOGO) {
+        const localPath = logoLocalPaths.get(ov.id);
+        if (!localPath) continue; // sin imagen, saltar
+
+        const inputIdx = extraInputPaths.length + 1; // 0 = concat input
+        extraInputPaths.push(localPath);
+        const pos = this.logoXY(cfg);
+
+        if (cfg.width) {
+          const scaledLabel = `sc${idx}`;
+          filterParts.push(`[${inputIdx}:v]scale=${cfg.width}:-1[${scaledLabel}]`);
+          filterParts.push(`[${currentStream}][${scaledLabel}]overlay=${pos}[${nextStream}]`);
+        } else {
+          filterParts.push(`[${currentStream}][${inputIdx}:v]overlay=${pos}[${nextStream}]`);
+        }
+
+      } else if (ov.type === OverlayType.TEXT_STATIC) {
+        const text = this.escapeText(cfg.text ?? '');
+        const font = cfg.bold ? FONT_BOLD : FONT;
+        const fs2  = cfg.fontSize ?? 24;
+        const fc   = cfg.fontColor ?? 'white';
+        const pos  = this.textXY(cfg);
+        const box  = cfg.bgColor
+          ? `:box=1:boxcolor=${cfg.bgColor}:boxborderw=8`
+          : ':box=1:boxcolor=black@0.5:boxborderw=8';
+        filterParts.push(
+          `[${currentStream}]drawtext=fontfile=${font}:text=${text}:fontsize=${fs2}:fontcolor=${fc}:${pos}${box}[${nextStream}]`,
+        );
+
+      } else if (ov.type === OverlayType.CLOCK) {
+        const fmt  = cfg.format === 'datetime' ? '%d-%m-%Y %T' : '%T';
+        // %{localtime\:FORMAT} — la \: evita que FFmpeg lo interprete como separador de opción
+        const text = `%{localtime\\:${fmt}}`;
+        const font = FONT_BOLD;
+        const fs2  = cfg.fontSize ?? 28;
+        const fc   = cfg.fontColor ?? 'white';
+        const pos  = this.textXY(cfg);
+        const box  = cfg.bgColor
+          ? `:box=1:boxcolor=${cfg.bgColor}:boxborderw=10`
+          : ':box=1:boxcolor=black@0.6:boxborderw=10';
+        filterParts.push(
+          `[${currentStream}]drawtext=fontfile=${font}:text=${text}:fontsize=${fs2}:fontcolor=${fc}:${pos}${box}[${nextStream}]`,
+        );
+
+      } else if (ov.type === OverlayType.TEXT_SCROLL || ov.type === OverlayType.TICKER) {
+        const text   = this.escapeText(cfg.text ?? '');
+        const font   = FONT;
+        const fs2    = cfg.fontSize ?? 20;
+        const fc     = cfg.fontColor ?? 'white';
+        const speed  = cfg.speed ?? 80;
+        const barH   = cfg.barHeight ?? 36;
+        const isBot  = (cfg.position ?? 'bottom') !== 'top';
+        const barY   = isBot ? `H-${barH}` : '0';
+        // Centro vertical dentro de la barra
+        const textY  = isBot ? `H-${barH}+(${barH}-text_h)/2` : `(${barH}-text_h)/2`;
+        // Scroll de derecha a izquierda: x = W - (t*speed mod (W+text_w))
+        const scrollX = `W-mod(t*${speed}\\,W+text_w)`;
+        const bgColor = cfg.bgColor ?? 'black@0.7';
+        const barLabel = `bar${idx}`;
+
+        // 1) Banda de fondo (full width)
+        filterParts.push(
+          `[${currentStream}]drawbox=x=0:y=${barY}:w=W:h=${barH}:color=${bgColor}:t=fill[${barLabel}]`,
+        );
+        // 2) Texto scrolling sobre la banda
+        filterParts.push(
+          `[${barLabel}]drawtext=fontfile=${font}:text=${text}:fontsize=${fs2}:fontcolor=${fc}:x=${scrollX}:y=${textY}[${nextStream}]`,
+        );
+
+      } else {
+        continue; // tipo desconocido
+      }
+
+      currentStream = nextStream;
+      idx++;
+    }
+
+    if (!filterParts.length) return null;
+
+    return {
+      filterComplex: filterParts.join(';'),
+      extraInputArgs: extraInputPaths.flatMap(p => ['-i', p]),
+      videoMapLabel: `[${currentStream}]`,
+    };
+  }
+
+  // ─── Helpers para posiciones ───────────────────────────────────
+
+  /** Posición x:y para el filtro overlay= (imágenes logo) */
+  private logoXY(cfg: any): string {
+    const pad = 10;
+    switch (cfg.position ?? 'top-left') {
+      case 'top-right':    return `W-w-${pad}:${pad}`;
+      case 'bottom-left':  return `${pad}:H-h-${pad}`;
+      case 'bottom-right': return `W-w-${pad}:H-h-${pad}`;
+      case 'center':       return `(W-w)/2:(H-h)/2`;
+      case 'custom':       return `${cfg.x ?? pad}:${cfg.y ?? pad}`;
+      default:             return `${pad}:${pad}`; // top-left
+    }
+  }
+
+  /** Posición x=...:y=... para drawtext */
+  private textXY(cfg: any): string {
+    const pad = 10;
+    switch (cfg.position ?? 'top-left') {
+      case 'top-right':    return `x=W-text_w-${pad}:y=${pad}`;
+      case 'bottom-left':  return `x=${pad}:y=H-text_h-${pad}`;
+      case 'bottom-right': return `x=W-text_w-${pad}:y=H-text_h-${pad}`;
+      case 'center':       return `x=(W-text_w)/2:y=(H-text_h)/2`;
+      case 'custom':       return `x=${cfg.x ?? pad}:y=${cfg.y ?? pad}`;
+      default:             return `x=${pad}:y=${pad}`; // top-left
+    }
+  }
+
+  /** Escapar texto para el argumento text= de drawtext */
+  private escapeText(text: string): string {
+    return text
+      .replace(/\\/g, '\\\\')   // \ → \\
+      .replace(/'/g, "\\'")     // ' → \'
+      .replace(/:/g, '\\:')     // : → \:
+      .replace(/,/g, '\\,')     // , → \,
+      .replace(/\[/g, '\\[')    // [ → \[
+      .replace(/\]/g, '\\]');   // ] → \]
   }
 
   // ─── Ejecutar FFmpeg sincrónico (preproceso) ───────────────────

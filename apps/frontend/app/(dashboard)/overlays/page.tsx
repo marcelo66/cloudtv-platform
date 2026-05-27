@@ -1,24 +1,745 @@
 'use client';
 
-import { Layers } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import {
+  Layers,
+  Plus,
+  Trash2,
+  Edit2,
+  Image as ImageIcon,
+  Type,
+  Clock,
+  AlignLeft,
+  ChevronDown,
+  ToggleLeft,
+  ToggleRight,
+  Upload,
+  X,
+  AlertCircle,
+} from 'lucide-react';
 import { Header } from '@/components/dashboard/Header';
+import apiClient from '@/lib/api-client';
+import {
+  useOverlays,
+  useCreateOverlay,
+  useUpdateOverlay,
+  useDeleteOverlay,
+  useUploadOverlayLogo,
+  type Overlay,
+  type OverlayType,
+  type CreateOverlayInput,
+} from '@/hooks/useOverlays';
+import { cn } from '@/lib/utils';
+import { toast } from 'sonner';
 
-export default function OverlaysPage() {
+// ─── Metadatos por tipo ───────────────────────────────────────────────────────
+
+const TYPE_META: Record<OverlayType, { label: string; desc: string; Icon: any; color: string }> = {
+  LOGO: {
+    label: 'Logo',
+    desc: 'Imagen estática superpuesta (PNG/JPG)',
+    Icon: ImageIcon,
+    color: 'text-blue-400',
+  },
+  TEXT_STATIC: {
+    label: 'Texto estático',
+    desc: 'Texto fijo en pantalla',
+    Icon: Type,
+    color: 'text-green-400',
+  },
+  TEXT_SCROLL: {
+    label: 'Texto scrolling',
+    desc: 'Texto que se desplaza de derecha a izquierda',
+    Icon: AlignLeft,
+    color: 'text-yellow-400',
+  },
+  CLOCK: {
+    label: 'Reloj',
+    desc: 'Hora en tiempo real (localtime)',
+    Icon: Clock,
+    color: 'text-purple-400',
+  },
+  TICKER: {
+    label: 'Ticker',
+    desc: 'Banda scrolling tipo news ticker',
+    Icon: AlignLeft,
+    color: 'text-orange-400',
+  },
+};
+
+const POSITIONS_XY = [
+  { value: 'top-left',     label: 'Arriba izquierda' },
+  { value: 'top-right',    label: 'Arriba derecha' },
+  { value: 'bottom-left',  label: 'Abajo izquierda' },
+  { value: 'bottom-right', label: 'Abajo derecha' },
+  { value: 'center',       label: 'Centro' },
+  { value: 'custom',       label: 'Personalizado (x/y)' },
+];
+
+const POSITIONS_BAR = [
+  { value: 'bottom', label: 'Abajo' },
+  { value: 'top',    label: 'Arriba' },
+];
+
+// ─── Defaults por tipo ────────────────────────────────────────────────────────
+
+const DEFAULT_CONFIG: Record<OverlayType, Record<string, any>> = {
+  LOGO: { position: 'top-left', width: 120, opacity: 1 },
+  TEXT_STATIC: { text: '', position: 'bottom-right', fontSize: 24, fontColor: 'white', bgColor: 'black@0.5', bold: false },
+  TEXT_SCROLL: { text: '', position: 'bottom', fontSize: 20, fontColor: 'white', bgColor: 'black@0.7', speed: 80, barHeight: 36 },
+  CLOCK: { position: 'top-right', fontSize: 28, fontColor: 'white', bgColor: 'black@0.6', format: 'time' },
+  TICKER: { text: '', position: 'bottom', fontSize: 20, fontColor: 'white', bgColor: 'black@0.7', speed: 80, barHeight: 36 },
+};
+
+// ─── Overlay card ─────────────────────────────────────────────────────────────
+
+function OverlayCard({
+  overlay,
+  channelId,
+  onEdit,
+  onDelete,
+  onToggle,
+}: {
+  overlay: Overlay;
+  channelId: string;
+  onEdit: (o: Overlay) => void;
+  onDelete: (id: string) => void;
+  onToggle: (o: Overlay) => void;
+}) {
+  const meta  = TYPE_META[overlay.type];
+  const { Icon } = meta;
+  const cfg   = overlay.config;
+
+  const configSummary = () => {
+    switch (overlay.type) {
+      case 'LOGO':
+        return cfg.imageUrl
+          ? `Imagen subida · ${cfg.position ?? 'top-left'}`
+          : 'Sin imagen · ' + (cfg.position ?? 'top-left');
+      case 'TEXT_STATIC':
+        return `"${(cfg.text ?? '').slice(0, 40)}" · ${cfg.position ?? 'top-left'} · ${cfg.fontSize ?? 24}px`;
+      case 'TEXT_SCROLL':
+      case 'TICKER':
+        return `"${(cfg.text ?? '').slice(0, 40)}" · ${cfg.speed ?? 80}px/s · ${cfg.position ?? 'bottom'}`;
+      case 'CLOCK':
+        return `${cfg.format === 'datetime' ? 'Fecha + hora' : 'Solo hora'} · ${cfg.position ?? 'top-right'} · ${cfg.fontSize ?? 28}px`;
+      default:
+        return '';
+    }
+  };
+
   return (
-    <div className="flex flex-col flex-1">
-      <Header title="Overlays" subtitle="Logos, textos y gráficos sobre la señal" />
-      <div className="flex-1 p-6 flex items-center justify-center">
-        <div className="glass-card p-16 text-center max-w-sm">
-          <div className="w-16 h-16 rounded-2xl bg-surface-700 flex items-center justify-center mx-auto mb-4">
-            <Layers className="w-8 h-8 text-slate-600" />
+    <div className={cn(
+      'glass-card p-4 transition-opacity',
+      !overlay.enabled && 'opacity-50',
+    )}>
+      <div className="flex items-start gap-3">
+        <div className={cn('w-9 h-9 rounded-lg bg-surface-700 flex items-center justify-center flex-shrink-0', meta.color)}>
+          <Icon className="w-4 h-4" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold text-white truncate">{overlay.name}</span>
+            <span className={cn('text-xs px-1.5 py-0.5 rounded font-medium border', meta.color,
+              'bg-surface-700 border-surface-600')}>
+              {meta.label}
+            </span>
+            <span className="text-xs text-slate-500 ml-auto">z:{overlay.zIndex}</span>
           </div>
-          <h3 className="text-base font-semibold text-white mb-2">Overlays</h3>
-          <p className="text-sm text-slate-500">
-            Agregá logos, banners de texto y gráficos animados sobre la señal en vivo.
-            Este módulo se activa junto al motor de playout avanzado.
-          </p>
+          <p className="text-xs text-slate-400 mt-0.5 truncate">{configSummary()}</p>
+          {overlay.type === 'LOGO' && cfg.imageUrl && (
+            <img
+              src={cfg.imageUrl}
+              alt="logo preview"
+              className="mt-2 h-8 object-contain rounded border border-surface-600"
+            />
+          )}
         </div>
       </div>
+
+      <div className="flex items-center gap-2 mt-3 pt-3 border-t border-surface-700">
+        {/* Toggle enabled */}
+        <button
+          onClick={() => onToggle(overlay)}
+          className={cn(
+            'flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded transition-colors',
+            overlay.enabled
+              ? 'text-green-400 hover:bg-green-500/10'
+              : 'text-slate-500 hover:bg-slate-500/10',
+          )}
+        >
+          {overlay.enabled
+            ? <><ToggleRight className="w-4 h-4" />Activo</>
+            : <><ToggleLeft className="w-4 h-4" />Inactivo</>
+          }
+        </button>
+
+        <div className="flex-1" />
+
+        <button
+          onClick={() => onEdit(overlay)}
+          className="p-1.5 rounded text-slate-400 hover:text-white hover:bg-surface-700 transition-colors"
+          title="Editar"
+        >
+          <Edit2 className="w-3.5 h-3.5" />
+        </button>
+        <button
+          onClick={() => onDelete(overlay.id)}
+          className="p-1.5 rounded text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+          title="Eliminar"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Modal de creación/edición ────────────────────────────────────────────────
+
+function OverlayFormModal({
+  channelId,
+  overlay,
+  onClose,
+}: {
+  channelId: string;
+  overlay: Overlay | null; // null = crear nuevo
+  onClose: () => void;
+}) {
+  const isEdit = !!overlay;
+
+  const [name, setName]         = useState(overlay?.name ?? '');
+  const [type, setType]         = useState<OverlayType>(overlay?.type ?? 'TEXT_STATIC');
+  const [enabled, setEnabled]   = useState(overlay?.enabled ?? true);
+  const [zIndex, setZIndex]     = useState(overlay?.zIndex ?? 0);
+  const [config, setConfig]     = useState<Record<string, any>>(
+    overlay?.config ?? DEFAULT_CONFIG['TEXT_STATIC'],
+  );
+
+  // Cuando cambia el tipo (solo en creación) resetear config
+  const handleTypeChange = (t: OverlayType) => {
+    setType(t);
+    setConfig({ ...DEFAULT_CONFIG[t] });
+  };
+
+  const setCfg = (key: string, value: any) =>
+    setConfig(prev => ({ ...prev, [key]: value }));
+
+  const createMut  = useCreateOverlay();
+  const updateMut  = useUpdateOverlay();
+  const uploadLogo = useUploadOverlayLogo();
+  const logoRef    = useRef<HTMLInputElement>(null);
+
+  const isLoading = createMut.isPending || updateMut.isPending;
+
+  const handleSubmit = async () => {
+    if (!name.trim()) { toast.error('El nombre es requerido'); return; }
+
+    if (isEdit) {
+      updateMut.mutate(
+        { channelId, id: overlay!.id, input: { name: name.trim(), enabled, config, zIndex } },
+        { onSuccess: onClose },
+      );
+    } else {
+      createMut.mutate(
+        {
+          channelId,
+          input: { name: name.trim(), type, enabled, config, zIndex } satisfies CreateOverlayInput,
+        },
+        { onSuccess: onClose },
+      );
+    }
+  };
+
+  const handleLogoFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !overlay) return;
+    uploadLogo.mutate({ channelId, id: overlay.id, file });
+    e.target.value = '';
+  };
+
+  const effectiveType = isEdit ? overlay!.type : type;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
+
+      <div className="relative bg-surface-800 border border-surface-700 rounded-2xl w-full max-w-lg max-h-[90vh] flex flex-col shadow-2xl">
+        {/* Header */}
+        <div className="flex items-center justify-between p-5 border-b border-surface-700">
+          <h2 className="text-base font-semibold text-white">
+            {isEdit ? 'Editar overlay' : 'Nuevo overlay'}
+          </h2>
+          <button onClick={onClose} className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-surface-700 transition-colors">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Body */}
+        <form onSubmit={(e) => { e.preventDefault(); handleSubmit(); }} className="flex-1 overflow-y-auto p-5 space-y-4">
+
+          {/* Nombre */}
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Nombre</label>
+            <input
+              value={name}
+              onChange={e => setName(e.target.value)}
+              placeholder="Ej: Logo canal, Ticker noticias…"
+              className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
+            />
+          </div>
+
+          {/* Tipo (solo en creación) */}
+          {!isEdit && (
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1">Tipo</label>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                {(Object.keys(TYPE_META) as OverlayType[]).map(t => {
+                  const m = TYPE_META[t];
+                  const { Icon: TIcon } = m;
+                  return (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => handleTypeChange(t)}
+                      className={cn(
+                        'flex flex-col items-center gap-1 p-2.5 rounded-xl border text-xs font-medium transition-all',
+                        type === t
+                          ? 'border-brand-500 bg-brand-500/10 text-white'
+                          : 'border-surface-600 bg-surface-700 text-slate-400 hover:border-surface-500 hover:text-white',
+                      )}
+                    >
+                      <TIcon className={cn('w-4 h-4', type === t ? 'text-brand-400' : m.color)} />
+                      {m.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Config específico por tipo */}
+          {/* ── LOGO ── */}
+          {effectiveType === 'LOGO' && (
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Posición</label>
+                <select
+                  value={config.position ?? 'top-left'}
+                  onChange={e => setCfg('position', e.target.value)}
+                  className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
+                >
+                  {POSITIONS_XY.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                </select>
+              </div>
+              {config.position === 'custom' && (
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">X (px)</label>
+                    <input type="number" value={config.x ?? 10} onChange={e => setCfg('x', +e.target.value)}
+                      className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Y (px)</label>
+                    <input type="number" value={config.y ?? 10} onChange={e => setCfg('y', +e.target.value)}
+                      className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                  </div>
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Ancho (px, 0=original)</label>
+                  <input type="number" min={0} value={config.width ?? 120} onChange={e => setCfg('width', +e.target.value || undefined)}
+                    className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Opacidad (0–1)</label>
+                  <input type="number" min={0} max={1} step={0.1} value={config.opacity ?? 1} onChange={e => setCfg('opacity', parseFloat(e.target.value))}
+                    className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                </div>
+              </div>
+
+              {/* Logo upload (solo en edición) */}
+              {isEdit && (
+                <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Imagen del logo</label>
+                  {config.imageUrl && (
+                    <img src={config.imageUrl} alt="logo" className="h-12 object-contain rounded mb-2 border border-surface-600" />
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => logoRef.current?.click()}
+                    disabled={uploadLogo.isPending}
+                    className="flex items-center gap-2 px-3 py-2 rounded-lg border border-dashed border-surface-500 text-xs text-slate-400 hover:border-brand-500 hover:text-brand-400 transition-colors disabled:opacity-50"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    {uploadLogo.isPending ? 'Subiendo...' : 'Subir PNG / JPG'}
+                  </button>
+                  <input ref={logoRef} type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={handleLogoFile} />
+                  {!isEdit && (
+                    <p className="text-xs text-slate-500 mt-1 flex items-center gap-1">
+                      <AlertCircle className="w-3 h-3" /> Primero guardá el overlay, luego subí la imagen.
+                    </p>
+                  )}
+                </div>
+              )}
+              {!isEdit && (
+                <p className="text-xs text-slate-500 flex items-center gap-1">
+                  <AlertCircle className="w-3 h-3" />
+                  Creá el overlay primero y luego volvé a editarlo para subir la imagen.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* ── TEXT_STATIC ── */}
+          {effectiveType === 'TEXT_STATIC' && (
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Texto</label>
+                <input value={config.text ?? ''} onChange={e => setCfg('text', e.target.value)}
+                  placeholder="Texto a mostrar en pantalla"
+                  className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Posición</label>
+                <select value={config.position ?? 'bottom-right'} onChange={e => setCfg('position', e.target.value)}
+                  className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500">
+                  {POSITIONS_XY.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                </select>
+              </div>
+              {config.position === 'custom' && (
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">X (px)</label>
+                    <input type="number" value={config.x ?? 10} onChange={e => setCfg('x', +e.target.value)}
+                      className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Y (px)</label>
+                    <input type="number" value={config.y ?? 10} onChange={e => setCfg('y', +e.target.value)}
+                      className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                  </div>
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Tamaño fuente (px)</label>
+                  <input type="number" min={8} max={120} value={config.fontSize ?? 24} onChange={e => setCfg('fontSize', +e.target.value)}
+                    className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Color texto</label>
+                  <input value={config.fontColor ?? 'white'} onChange={e => setCfg('fontColor', e.target.value)}
+                    placeholder="white, #FF0000…"
+                    className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500" />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Color fondo (FFmpeg: black@0.5, #000000@0.7…)</label>
+                <input value={config.bgColor ?? 'black@0.5'} onChange={e => setCfg('bgColor', e.target.value)}
+                  className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" checked={!!config.bold} onChange={e => setCfg('bold', e.target.checked)}
+                  className="rounded border-surface-600" />
+                <span className="text-xs text-slate-300">Negrita</span>
+              </label>
+            </div>
+          )}
+
+          {/* ── TEXT_SCROLL / TICKER ── */}
+          {(effectiveType === 'TEXT_SCROLL' || effectiveType === 'TICKER') && (
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Texto</label>
+                <textarea value={config.text ?? ''} onChange={e => setCfg('text', e.target.value)}
+                  rows={2} placeholder="Texto que scrolleará de derecha a izquierda"
+                  className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 resize-none" />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Posición</label>
+                  <select value={config.position ?? 'bottom'} onChange={e => setCfg('position', e.target.value)}
+                    className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500">
+                    {POSITIONS_BAR.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Velocidad (px/s)</label>
+                  <input type="number" min={20} max={400} value={config.speed ?? 80} onChange={e => setCfg('speed', +e.target.value)}
+                    className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Tamaño fuente (px)</label>
+                  <input type="number" min={8} max={72} value={config.fontSize ?? 20} onChange={e => setCfg('fontSize', +e.target.value)}
+                    className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Alto de banda (px)</label>
+                  <input type="number" min={24} max={80} value={config.barHeight ?? 36} onChange={e => setCfg('barHeight', +e.target.value)}
+                    className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Color texto</label>
+                  <input value={config.fontColor ?? 'white'} onChange={e => setCfg('fontColor', e.target.value)}
+                    className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Color banda</label>
+                  <input value={config.bgColor ?? 'black@0.7'} onChange={e => setCfg('bgColor', e.target.value)}
+                    className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── CLOCK ── */}
+          {effectiveType === 'CLOCK' && (
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Formato</label>
+                <select value={config.format ?? 'time'} onChange={e => setCfg('format', e.target.value)}
+                  className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500">
+                  <option value="time">Solo hora (HH:MM:SS)</option>
+                  <option value="datetime">Fecha y hora (DD-MM-YYYY HH:MM:SS)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Posición</label>
+                <select value={config.position ?? 'top-right'} onChange={e => setCfg('position', e.target.value)}
+                  className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500">
+                  {POSITIONS_XY.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                </select>
+              </div>
+              {config.position === 'custom' && (
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">X (px)</label>
+                    <input type="number" value={config.x ?? 10} onChange={e => setCfg('x', +e.target.value)}
+                      className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Y (px)</label>
+                    <input type="number" value={config.y ?? 10} onChange={e => setCfg('y', +e.target.value)}
+                      className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                  </div>
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Tamaño fuente (px)</label>
+                  <input type="number" min={12} max={96} value={config.fontSize ?? 28} onChange={e => setCfg('fontSize', +e.target.value)}
+                    className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Color texto</label>
+                  <input value={config.fontColor ?? 'white'} onChange={e => setCfg('fontColor', e.target.value)}
+                    className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Color fondo</label>
+                <input value={config.bgColor ?? 'black@0.6'} onChange={e => setCfg('bgColor', e.target.value)}
+                  className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+              </div>
+            </div>
+          )}
+
+          {/* Común: estado + z-index */}
+          <div className="pt-2 border-t border-surface-700 space-y-3">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-medium text-slate-400">Habilitado</label>
+              <button
+                type="button"
+                onClick={() => setEnabled(!enabled)}
+                className={cn(
+                  'flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border transition-colors',
+                  enabled
+                    ? 'border-green-500/30 bg-green-500/10 text-green-400'
+                    : 'border-surface-600 bg-surface-700 text-slate-400',
+                )}
+              >
+                {enabled ? <><ToggleRight className="w-4 h-4" />Activo</> : <><ToggleLeft className="w-4 h-4" />Inactivo</>}
+              </button>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1">Z-Index (orden de capas, mayor = encima)</label>
+              <input type="number" min={0} value={zIndex} onChange={e => setZIndex(+e.target.value)}
+                className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+            </div>
+          </div>
+        </form>
+
+        {/* Footer */}
+        <div className="p-5 border-t border-surface-700 flex gap-3">
+          <button type="button" onClick={onClose}
+            className="flex-1 py-2 rounded-xl border border-surface-600 text-sm text-slate-400 hover:text-white hover:bg-surface-700 transition-colors">
+            Cancelar
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={isLoading}
+            className="flex-1 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-sm font-semibold text-white transition-colors disabled:opacity-50"
+          >
+            {isLoading ? 'Guardando...' : isEdit ? 'Guardar cambios' : 'Crear overlay'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Página principal ─────────────────────────────────────────────────────────
+
+export default function OverlaysPage() {
+  const [channelId, setChannelId]   = useState<string | null>(null);
+  const [channels, setChannels]     = useState<Array<{ id: string; name: string }>>([]);
+  const [showModal, setShowModal]   = useState(false);
+  const [editing, setEditing]       = useState<Overlay | null>(null);
+
+  // Cargar canales
+  useEffect(() => {
+    apiClient.get('/channels').then(({ data }) => {
+      setChannels(data);
+      if (data.length > 0) setChannelId(data[0].id);
+    }).catch(() => {});
+  }, []);
+
+  const { data: overlays = [], isLoading } = useOverlays(channelId);
+  const deleteMut  = useDeleteOverlay();
+  const updateMut  = useUpdateOverlay();
+
+  const handleOpenCreate = () => {
+    setEditing(null);
+    setShowModal(true);
+  };
+
+  const handleOpenEdit = (o: Overlay) => {
+    setEditing(o);
+    setShowModal(true);
+  };
+
+  const handleDelete = (id: string) => {
+    if (!channelId || !confirm('¿Eliminar este overlay?')) return;
+    deleteMut.mutate({ channelId, id });
+  };
+
+  const handleToggle = (o: Overlay) => {
+    if (!channelId) return;
+    updateMut.mutate({
+      channelId,
+      id: o.id,
+      input: { enabled: !o.enabled },
+    });
+  };
+
+  return (
+    <div className="flex flex-col flex-1">
+      <Header title="Overlays" subtitle="Logos, textos y gráficos sobre la señal en vivo" />
+
+      <div className="flex-1 p-6 overflow-y-auto space-y-6">
+
+        {/* Canal + botón agregar */}
+        <div className="flex items-center gap-3 flex-wrap">
+          {channels.length > 1 && (
+            <div className="relative">
+              <select
+                value={channelId ?? ''}
+                onChange={e => setChannelId(e.target.value)}
+                className="appearance-none bg-surface-700 border border-surface-600 rounded-xl pl-3 pr-8 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
+              >
+                {channels.map(ch => (
+                  <option key={ch.id} value={ch.id}>{ch.name}</option>
+                ))}
+              </select>
+              <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+            </div>
+          )}
+          {channels.length === 1 && (
+            <span className="text-sm font-medium text-white">{channels[0].name}</span>
+          )}
+
+          <div className="flex-1" />
+
+          <button
+            onClick={handleOpenCreate}
+            disabled={!channelId}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-sm font-semibold text-white transition-colors disabled:opacity-40"
+          >
+            <Plus className="w-4 h-4" />
+            Agregar overlay
+          </button>
+        </div>
+
+        {/* Sin canales */}
+        {channels.length === 0 && (
+          <div className="glass-card p-12 text-center">
+            <Layers className="w-10 h-10 text-slate-600 mx-auto mb-3" />
+            <p className="text-sm text-slate-500">No tenés canales creados aún.</p>
+          </div>
+        )}
+
+        {/* Loading */}
+        {channelId && isLoading && (
+          <div className="glass-card p-8 text-center text-sm text-slate-500">Cargando overlays...</div>
+        )}
+
+        {/* Sin overlays */}
+        {channelId && !isLoading && overlays.length === 0 && (
+          <div className="glass-card p-12 text-center">
+            <Layers className="w-10 h-10 text-slate-600 mx-auto mb-3" />
+            <h3 className="text-sm font-semibold text-white mb-1">Sin overlays</h3>
+            <p className="text-xs text-slate-500 mb-4">
+              Agregá un logo, texto, reloj o ticker para superponerlos sobre la señal en vivo.
+            </p>
+            <button
+              onClick={handleOpenCreate}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-sm font-semibold text-white transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+              Agregar primer overlay
+            </button>
+          </div>
+        )}
+
+        {/* Grid de overlays */}
+        {overlays.length > 0 && (
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-xs text-slate-500">
+                {overlays.filter(o => o.enabled).length} activo(s) de {overlays.length}
+                {' '}· Se aplican en orden por z-index cuando el canal está en vivo.
+              </p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {overlays.map(o => (
+                <OverlayCard
+                  key={o.id}
+                  overlay={o}
+                  channelId={channelId!}
+                  onEdit={handleOpenEdit}
+                  onDelete={handleDelete}
+                  onToggle={handleToggle}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Modal */}
+      {showModal && channelId && (
+        <OverlayFormModal
+          channelId={channelId}
+          overlay={editing}
+          onClose={() => setShowModal(false)}
+        />
+      )}
     </div>
   );
 }

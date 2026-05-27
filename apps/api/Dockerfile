@@ -17,9 +17,9 @@ RUN ./node_modules/.bin/nest build
 
 # ─── Imagen final ─────────────────────────────────────────────
 FROM node:20-slim AS runner
-# Instalar FFmpeg + OpenSSL + cliente de postgres
+# Instalar FFmpeg + OpenSSL + fuentes DejaVu (drawtext) + cliente de postgres
 RUN apt-get update && \
-    apt-get install -y ffmpeg openssl postgresql-client && \
+    apt-get install -y ffmpeg openssl postgresql-client fonts-dejavu-core && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV NODE_ENV=production
