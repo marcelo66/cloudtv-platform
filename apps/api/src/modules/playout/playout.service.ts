@@ -208,7 +208,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     }
     this.log(session, `Playlist: "${playlist.name}" — ${playlist.items.length} video(s)`);
 
-    // 2. Descargar MP4 → disco local
+    // 2. Descargar MP4s — se reutiliza caché si ya existen del reinicio anterior
     const videosDir = path.join(session.hlsDir, 'videos');
     await fs.mkdir(videosDir, { recursive: true });
 
@@ -219,13 +219,21 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       const key = item.video.processedKey ?? item.video.originalKey;
       if (!key) { this.log(session, `  WARN: video ${item.video.id} sin key`); continue; }
       const mp4Path = path.join(videosDir, `${String(i).padStart(4, '0')}.mp4`);
-      this.log(session, `  Descargando ${i + 1}/${playlist.items.length}: ${key}`);
-      try {
-        await this.storage.downloadToFile(key, mp4Path);
+      // Reutilizar si ya está en disco (reinicio rápido tras falla de overlay, etc.)
+      let alreadyCached = false;
+      try { await fs.access(mp4Path); alreadyCached = true; } catch { /* no existe */ }
+      if (alreadyCached) {
+        this.log(session, `  ✓ (en caché) ${i + 1}/${playlist.items.length}: ${path.basename(mp4Path)}`);
         downloadedMp4s.push(mp4Path);
-        this.log(session, `  ✓ ${path.basename(mp4Path)} (${item.video.duration?.toFixed(1) ?? '?'}s)`);
-      } catch (err: any) {
-        this.log(session, `  ERROR descargando ${key}: ${err.message}`);
+      } else {
+        this.log(session, `  Descargando ${i + 1}/${playlist.items.length}: ${key}`);
+        try {
+          await this.storage.downloadToFile(key, mp4Path);
+          downloadedMp4s.push(mp4Path);
+          this.log(session, `  ✓ ${path.basename(mp4Path)} (${item.video.duration?.toFixed(1) ?? '?'}s)`);
+        } catch (err: any) {
+          this.log(session, `  ERROR descargando ${key}: ${err.message}`);
+        }
       }
     }
 
@@ -236,48 +244,14 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     }
     if (session.stopping) return;
 
-    // 3. Normalizar cada MP4 → MPEG-TS
-    const tsFiles: string[] = [];
-    const scale = this.config.get('FFMPEG_SCALE', '854:480');
-
-    for (let i = 0; i < downloadedMp4s.length; i++) {
-      if (session.stopping) return;
-      const mp4Path = downloadedMp4s[i];
-      const tsPath  = mp4Path.replace('.mp4', '.ts');
-      this.log(session, `  Normalizando ${i + 1}/${downloadedMp4s.length} → ${path.basename(tsPath)}`);
-      try {
-        await this.runFfmpegSync([
-          '-loglevel', 'error',
-          '-i', mp4Path,
-          '-vf', `scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,fps=25,format=yuv420p`,
-          '-c:v', 'libx264',
-          '-preset', this.config.get('FFMPEG_PRESET', 'ultrafast'),
-          '-crf', '26',
-          '-b:v', '1000k', '-maxrate', '1200k', '-bufsize', '2000k',
-          '-g', '50', '-sc_threshold', '0',
-          '-c:a', 'aac', '-b:a', '96k', '-ar', '44100', '-ac', '2',
-          '-f', 'mpegts', '-y', tsPath,
-        ]);
-        tsFiles.push(tsPath);
-        this.log(session, `  ✓ normalizado: ${path.basename(tsPath)}`);
-      } catch (err: any) {
-        this.log(session, `  ERROR normalizando ${path.basename(mp4Path)}: ${err.message}`);
-      }
-    }
-
-    if (tsFiles.length === 0) {
-      this.log(session, 'ERROR: No se pudo normalizar ningún video.');
-      await this.prisma.channel.update({ where: { id: session.channelId }, data: { status: 'ERROR' } });
-      return;
-    }
-    if (session.stopping) return;
-
-    // 4. concat.txt
+    // 3. concat.txt apuntando a los MP4s originales (no hay pre-normalización)
+    // El encode se hace en un único paso FFmpeg → segmentos HLS listos en segundos
     const concatPath = path.join(session.hlsDir, 'concat.txt');
-    await fs.writeFile(concatPath, tsFiles.map(f => `file '${f}'`).join('\n') + '\n');
-    this.log(session, `concat.txt listo con ${tsFiles.length} archivos .ts`);
+    await fs.writeFile(concatPath, downloadedMp4s.map(f => `file '${f}'`).join('\n') + '\n');
+    this.log(session, `concat.txt listo con ${downloadedMp4s.length} video(s)`);
 
-    // 5. Overlays
+    // 4. Overlays
+    const scale = this.config.get('FFMPEG_SCALE', '854:480');
     const overlays = await this.overlaysService.getEnabledForChannel(session.channelId);
     const fontsOk   = await this.checkFontsAvailable();
 
@@ -289,14 +263,14 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     }
 
     const overlayFilter = (overlays.length > 0 && !session.overlaysDisabled && fontsOk)
-      ? await this.buildOverlayFilter(session, overlays)
+      ? await this.buildOverlayFilter(session, overlays, scale)
       : null;
 
     this.log(session, overlayFilter
-      ? `Overlays activos: ${overlays.length} → filter_complex (re-encode)`
-      : 'Sin overlays → stream copy (rápido)');
+      ? `Overlays activos: ${overlays.length} → filter_complex`
+      : 'Sin overlays → encode directo');
 
-    // 6. FFmpeg HLS principal
+    // 5. FFmpeg HLS — encode único desde MP4 originales, sin pre-normalización
     const m3u8Path = path.join(session.hlsDir, 'index.m3u8');
 
     const hlsArgs = [
@@ -310,17 +284,21 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       '-y', 'index.m3u8',
     ];
 
-    // -stream_loop -1 hace que FFmpeg repita el concat infinitamente (24/7)
-    // sin esto FFmpeg termina al agotar los archivos y sale con code=0
-    const args: string[] = !overlayFilter
+    const codecArgs = [
+      '-c:v', 'libx264',
+      '-preset', this.config.get('FFMPEG_PRESET', 'ultrafast'),
+      '-crf', '26',
+      '-b:v', '1000k', '-maxrate', '1200k', '-bufsize', '2000k',
+      '-g', '50', '-sc_threshold', '0',
+      '-c:a', 'aac', '-b:a', '96k', '-ar', '44100', '-ac', '2',
+    ];
+
+    // Filtro de normalización para cuando no hay overlays (scale + fps + formato)
+    const normalizeVf = `scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,fps=25,format=yuv420p`;
+
+    // -stream_loop -1: bucle infinito del playlist para broadcast 24/7
+    const args: string[] = overlayFilter
       ? [
-          '-loglevel', 'warning',
-          '-stream_loop', '-1',
-          '-f', 'concat', '-safe', '0', '-i', concatPath,
-          '-c', 'copy',
-          ...hlsArgs,
-        ]
-      : [
           '-loglevel', 'warning',
           '-stream_loop', '-1',
           '-f', 'concat', '-safe', '0', '-i', concatPath,
@@ -328,12 +306,15 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           '-filter_complex', overlayFilter.filterComplex,
           '-map', overlayFilter.videoMapLabel,
           '-map', '0:a?',
-          '-c:v', 'libx264',
-          '-preset', this.config.get('FFMPEG_PRESET', 'ultrafast'),
-          '-crf', '26',
-          '-b:v', '1000k', '-maxrate', '1200k', '-bufsize', '2000k',
-          '-g', '50', '-sc_threshold', '0',
-          '-c:a', 'aac', '-b:a', '96k', '-ar', '44100', '-ac', '2',
+          ...codecArgs,
+          ...hlsArgs,
+        ]
+      : [
+          '-loglevel', 'warning',
+          '-stream_loop', '-1',
+          '-f', 'concat', '-safe', '0', '-i', concatPath,
+          '-vf', normalizeVf,
+          ...codecArgs,
           ...hlsArgs,
         ];
 
@@ -565,6 +546,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
   private async buildOverlayFilter(
     session: PlayoutSession,
     overlays: Overlay[],
+    scale: string,
   ): Promise<{ filterComplex: string; extraInputArgs: string[]; videoMapLabel: string } | null> {
     const enabled = [...overlays]
       .filter(o => o.enabled)
@@ -590,7 +572,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
     const filterParts: string[] = [];
     const extraInputPaths: string[] = [];
-    let currentStream = '0:v';
+    // Primer paso: normalizar resolución/fps igual que en el camino sin overlays
+    filterParts.push(
+      `[0:v]scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,fps=25,format=yuv420p[norm]`,
+    );
+    let currentStream = 'norm';
     let idx = 0;
 
     for (const ov of enabled) {
@@ -693,23 +679,6 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       .replace(/,/g, '\\,')
       .replace(/\[/g, '\\[')
       .replace(/\]/g, '\\]');
-  }
-
-  // ─── FFmpeg sincrónico (normalización) ───────────────────────
-
-  private runFfmpegSync(args: string[]): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
-      const errLines: string[] = [];
-      proc.stderr.on('data', (b: Buffer) =>
-        b.toString().split('\n').forEach(l => { if (l.trim()) errLines.push(l.trim()); }),
-      );
-      proc.on('close', code => {
-        if (code === 0) resolve();
-        else reject(new Error(errLines.slice(-5).join(' | ') || `exit ${code}`));
-      });
-      proc.on('error', reject);
-    });
   }
 
   // ─── Log helper ────────────────────────────────────────────────
