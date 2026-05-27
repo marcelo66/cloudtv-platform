@@ -18,12 +18,12 @@ interface PlayoutSession {
   hlsDir: string;
   stopping: boolean;
   startedAt: Date;
-  recentLogs: string[];   // últimas líneas de stderr de FFmpeg
+  recentLogs: string[];
   restarts: number;
 }
 
 const HLS_BASE = path.join('/tmp', 'cloudtv-hls');
-const MAX_LOGS = 200;
+const MAX_LOGS = 300;
 
 @Injectable()
 export class PlayoutService implements OnModuleDestroy {
@@ -42,7 +42,7 @@ export class PlayoutService implements OnModuleDestroy {
     }
   }
 
-  // ─── Public API ───────────────────────────────────────────────
+  // ─── Public API ────────────────────────────────────────────────
 
   async start(channelId: string, userId: string): Promise<void> {
     const channel = await this.prisma.channel.findFirst({
@@ -74,12 +74,14 @@ export class PlayoutService implements OnModuleDestroy {
       },
     });
 
+    // No bloqueante
     this.launchFfmpeg(session).catch((err) => {
-      this.logger.error(`[${channelId}] launch error: ${err.message}`);
+      this.log(session, `ERROR en launchFfmpeg: ${err.message}`);
     });
   }
 
   async stop(channelId: string, userId: string): Promise<void> {
+    // Verificar que el canal existe (no que sea LIVE — puede estar en STARTING)
     const channel = await this.prisma.channel.findFirst({
       where: { id: channelId, userId },
     });
@@ -87,11 +89,6 @@ export class PlayoutService implements OnModuleDestroy {
     await this.stopInternal(channelId);
   }
 
-  isActive(channelId: string): boolean {
-    return this.sessions.has(channelId);
-  }
-
-  /** Últimas N líneas de stderr de FFmpeg para este canal */
   getLogs(channelId: string): string[] {
     return this.sessions.get(channelId)?.recentLogs ?? [];
   }
@@ -99,12 +96,7 @@ export class PlayoutService implements OnModuleDestroy {
   getStatus(channelId: string) {
     const s = this.sessions.get(channelId);
     if (!s) return null;
-    return {
-      active: true,
-      startedAt: s.startedAt,
-      restarts: s.restarts,
-      pid: s.process?.pid ?? null,
-    };
+    return { active: true, startedAt: s.startedAt, restarts: s.restarts, pid: s.process?.pid ?? null };
   }
 
   getHlsFilePath(channelId: string, filename: string): string | null {
@@ -112,7 +104,7 @@ export class PlayoutService implements OnModuleDestroy {
     return path.join(HLS_BASE, channelId, filename);
   }
 
-  // ─── Internal ─────────────────────────────────────────────────
+  // ─── Internal ──────────────────────────────────────────────────
 
   private async stopInternal(channelId: string): Promise<void> {
     const session = this.sessions.get(channelId);
@@ -120,28 +112,29 @@ export class PlayoutService implements OnModuleDestroy {
       session.stopping = true;
       this.killSession(session);
       this.sessions.delete(channelId);
-      try {
-        await fs.rm(session.hlsDir, { recursive: true, force: true });
-      } catch { /* no crítico */ }
+      try { await fs.rm(session.hlsDir, { recursive: true, force: true }); } catch { /* ok */ }
     }
+    // Siempre forzar OFFLINE en la BD, incluso si no había sesión en memoria
     await this.prisma.channel.update({
       where: { id: channelId },
       data: { status: 'OFFLINE', hlsUrl: null },
     });
   }
 
-  private killSession(session: PlayoutSession) {
-    if (session.process && !session.process.killed) {
-      try { session.process.kill('SIGTERM'); } catch { /* ignorar */ }
+  private killSession(s: PlayoutSession) {
+    if (s.process && !s.process.killed) {
+      try { s.process.kill('SIGTERM'); } catch { /* ignorar */ }
     }
   }
+
+  // ─── FFmpeg ────────────────────────────────────────────────────
 
   private async launchFfmpeg(session: PlayoutSession): Promise<void> {
     if (session.stopping) return;
 
-    // ── 1. Playlist activa ─────────────────────────────────────
+    // 1. Playlist activa
     const playlist = await this.getActivePlaylist(session.channelId);
-    if (!playlist || !playlist.items.length) {
+    if (!playlist?.items?.length) {
       this.log(session, 'ERROR: Sin playlist o sin videos READY. Abortando.');
       await this.prisma.channel.update({
         where: { id: session.channelId },
@@ -150,32 +143,45 @@ export class PlayoutService implements OnModuleDestroy {
       return;
     }
 
-    // ── 2. Construir concat.txt con presigned URLs ─────────────
-    // Usamos presigned URLs (autenticadas, 24 h de validez) para evitar
-    // cualquier problema de permisos en MinIO, independientemente de la
-    // política del bucket.
-    const concatPath = path.join(session.hlsDir, 'concat.txt');
-    const lines: string[] = [];
-
     this.log(session, `Playlist: "${playlist.name}" — ${playlist.items.length} video(s)`);
 
-    for (const item of playlist.items) {
+    // 2. Descargar videos a disco local
+    //    Esto garantiza que FFmpeg lea archivos locales, sin problemas de
+    //    red/auth/URL-encoding con MinIO.
+    const videosDir = path.join(session.hlsDir, 'videos');
+    await fs.mkdir(videosDir, { recursive: true });
+
+    const lines: string[] = [];
+    let downloadedCount = 0;
+
+    for (let i = 0; i < playlist.items.length; i++) {
+      if (session.stopping) return;
+
+      const item = playlist.items[i];
       const key = item.video.processedKey ?? item.video.originalKey;
       if (!key) {
-        this.log(session, `WARN: video ${item.video.id} sin key, omitiendo`);
+        this.log(session, `  WARN: video ${item.video.id} sin key, omitiendo`);
         continue;
       }
-      // Presigned URL válida 24 h → FFmpeg la usa como HTTP normal
-      const url = await this.storage.getPresignedUrl(key, 86400);
-      lines.push(`file '${url}'`);
-      if (item.video.duration) {
-        lines.push(`duration ${item.video.duration.toFixed(3)}`);
+
+      const localPath = path.join(videosDir, `${String(i).padStart(4, '0')}.mp4`);
+      this.log(session, `  Descargando ${i + 1}/${playlist.items.length}: ${key}`);
+
+      try {
+        await this.storage.downloadToFile(key, localPath);
+        downloadedCount++;
+        lines.push(`file '${localPath}'`);
+        if (item.video.duration) {
+          lines.push(`duration ${item.video.duration.toFixed(3)}`);
+        }
+        this.log(session, `  ✓ ${path.basename(localPath)} (${item.video.duration?.toFixed(1) ?? '?'}s)`);
+      } catch (err: any) {
+        this.log(session, `  ERROR descargando ${key}: ${err.message}`);
       }
-      this.log(session, `  + ${key} (${item.video.duration?.toFixed(1) ?? '?'}s)`);
     }
 
-    if (!lines.length) {
-      this.log(session, 'ERROR: ningún video tiene key válida.');
+    if (downloadedCount === 0) {
+      this.log(session, 'ERROR: No se pudo descargar ningún video.');
       await this.prisma.channel.update({
         where: { id: session.channelId },
         data: { status: 'ERROR' },
@@ -183,36 +189,32 @@ export class PlayoutService implements OnModuleDestroy {
       return;
     }
 
-    // NOTA: NO incluir header "ffconcat version 1.0" cuando se usa -f concat
-    await fs.writeFile(concatPath, lines.join('\n') + '\n');
-    this.log(session, `concat.txt escrito con ${lines.length / 2 | 0} entradas`);
+    if (session.stopping) return;
 
-    // ── 3. Args FFmpeg ─────────────────────────────────────────
-    const preset = this.config.get('FFMPEG_PRESET', 'veryfast');
-    const segPattern = path.join(session.hlsDir, 'seg%05d.ts');
-    const indexPath  = path.join(session.hlsDir, 'index.m3u8');
+    // 3. Concat.txt con rutas locales
+    const concatPath = path.join(session.hlsDir, 'concat.txt');
+    await fs.writeFile(concatPath, lines.join('\n') + '\n');
+    this.log(session, `concat.txt listo con ${downloadedCount} videos`);
+
+    // 4. FFmpeg
+    const preset  = this.config.get('FFMPEG_PRESET', 'veryfast');
+    const segPat  = path.join(session.hlsDir, 'seg%05d.ts');
+    const m3u8    = path.join(session.hlsDir, 'index.m3u8');
 
     const args = [
-      '-loglevel', 'warning',       // Mostrar solo warnings y errores
-      '-re',                         // Leer a velocidad nativa (tiempo real)
+      '-loglevel', 'info',
+      '-re',
       '-f', 'concat',
       '-safe', '0',
-      '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
       '-i', concatPath,
-      // Normalizar resolución y fps
-      '-vf', [
-        'scale=1280:720:force_original_aspect_ratio=decrease',
-        'pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black',
-        'fps=fps=25',
-      ].join(','),
+      '-vf', 'scale=1280:720,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,fps=25',
       '-c:v', 'libx264',
       '-preset', preset,
       '-crf', '23',
       '-b:v', '2000k',
       '-maxrate', '2500k',
       '-bufsize', '4000k',
-      '-g', '50',                    // GOP = 2 seg a 25fps
-      '-keyint_min', '50',
+      '-g', '50',
       '-sc_threshold', '0',
       '-c:a', 'aac',
       '-b:a', '128k',
@@ -223,41 +225,40 @@ export class PlayoutService implements OnModuleDestroy {
       '-hls_list_size', '10',
       '-hls_flags', 'delete_segments+append_list+independent_segments',
       '-hls_segment_type', 'mpegts',
-      '-hls_segment_filename', segPattern,
+      '-hls_segment_filename', segPat,
       '-y',
-      indexPath,
+      m3u8,
     ];
 
-    this.log(session, `FFmpeg cmd: ffmpeg ${args.slice(0, 8).join(' ')} ...`);
-
+    this.log(session, `Lanzando FFmpeg (${args.length} args)...`);
     const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     session.process = proc;
 
-    // Capturar TODO el stderr de FFmpeg
     proc.stderr.on('data', (chunk: Buffer) => {
-      chunk.toString().split('\n').forEach((line) => {
-        const trimmed = line.trim();
-        if (trimmed) this.log(session, `ffmpeg: ${trimmed}`);
+      chunk.toString().split('\n').forEach((l) => {
+        const t = l.trim();
+        if (t) this.log(session, `ffmpeg: ${t}`);
       });
     });
 
     proc.on('spawn', () => {
-      this.log(session, `FFmpeg PID=${proc.pid} arrancó. Esperando primer segmento...`);
-      this.waitForM3u8(session, indexPath);
+      this.log(session, `FFmpeg PID=${proc.pid} en marcha. Esperando index.m3u8...`);
+      this.waitForM3u8(session, m3u8);
     });
 
-    proc.on('close', (code, signal) => {
-      this.log(session, `FFmpeg cerró (code=${code} signal=${signal})`);
+    proc.on('close', (code, sig) => {
+      this.log(session, `FFmpeg terminó (code=${code} sig=${sig})`);
       session.process = null;
       if (!session.stopping) {
         session.restarts++;
-        this.log(session, `Reinicio #${session.restarts} en 3 s...`);
+        this.log(session, `Loop: reinicio #${session.restarts} en 3s...`);
+        // Volver a descargar/lanzar (por si la playlist cambió)
         setTimeout(() => this.launchFfmpeg(session), 3000);
       }
     });
 
     proc.on('error', async (err) => {
-      this.log(session, `ERROR spawn: ${err.message}`);
+      this.log(session, `ERROR spawn FFmpeg: ${err.message}`);
       if (!session.stopping) {
         await this.prisma.channel.update({
           where: { id: session.channelId },
@@ -267,17 +268,17 @@ export class PlayoutService implements OnModuleDestroy {
     });
   }
 
-  // ─── Esperar primer segmento ───────────────────────────────────
+  // ─── Polling m3u8 ──────────────────────────────────────────────
 
-  private waitForM3u8(session: PlayoutSession, indexPath: string) {
-    const MAX_MS = 120_000;   // 2 minutos máximo
+  private waitForM3u8(session: PlayoutSession, m3u8Path: string) {
+    const MAX_MS = 120_000;
     const POLL_MS = 2_000;
-    const started = Date.now();
+    const t0 = Date.now();
 
     const check = async () => {
       if (session.stopping) return;
       try {
-        await fs.access(indexPath);
+        await fs.access(m3u8Path);
         if (!session.stopping) {
           await this.prisma.channel.update({
             where: { id: session.channelId },
@@ -286,12 +287,11 @@ export class PlayoutService implements OnModuleDestroy {
           this.log(session, '✓ index.m3u8 listo → LIVE_PLAYLIST');
         }
       } catch {
-        const elapsed = Date.now() - started;
+        const elapsed = Date.now() - t0;
         if (elapsed < MAX_MS) {
-          this.log(session, `Esperando m3u8... ${Math.round(elapsed / 1000)}s`);
           setTimeout(check, POLL_MS);
         } else {
-          this.log(session, `TIMEOUT: index.m3u8 no apareció en ${MAX_MS / 1000}s`);
+          this.log(session, `TIMEOUT ${MAX_MS / 1000}s esperando index.m3u8`);
           await this.prisma.channel.update({
             where: { id: session.channelId },
             data: { status: 'ERROR' },
@@ -303,17 +303,17 @@ export class PlayoutService implements OnModuleDestroy {
     setTimeout(check, POLL_MS);
   }
 
-  // ─── Helper log ───────────────────────────────────────────────
+  // ─── Log helper ────────────────────────────────────────────────
 
   private log(session: PlayoutSession, msg: string) {
-    const ts = new Date().toISOString().slice(11, 23); // HH:mm:ss.mmm
+    const ts = new Date().toISOString().slice(11, 23);
     const line = `[${ts}] ${msg}`;
     session.recentLogs.push(line);
     if (session.recentLogs.length > MAX_LOGS) session.recentLogs.shift();
     this.logger.log(`[${session.channelId}] ${msg}`);
   }
 
-  // ─── Playlist activa ──────────────────────────────────────────
+  // ─── Playlist activa ───────────────────────────────────────────
 
   private async getActivePlaylist(channelId: string) {
     const now = new Date();
@@ -334,7 +334,7 @@ export class PlayoutService implements OnModuleDestroy {
       },
     } as const;
 
-    // 1. Programa activo ahora
+    // 1. Programa activo
     const schedule = await this.prisma.schedule.findFirst({
       where: {
         channelId,
@@ -343,22 +343,18 @@ export class PlayoutService implements OnModuleDestroy {
         endTime:   { gte: now },
       },
       orderBy: { priority: 'desc' },
-      include: {
-        playlist: {
-          include: { items: itemsArgs },
-        },
-      },
+      include: { playlist: { include: { items: itemsArgs } } },
     });
     if (schedule?.playlist?.items?.length) return schedule.playlist;
 
-    // 2. Default playlist
+    // 2. Default
     const def = await this.prisma.playlist.findFirst({
       where: { channelId, isDefault: true },
       include: { items: itemsArgs },
     });
     if (def?.items?.length) return def;
 
-    // 3. Primera playlist
+    // 3. Primera disponible
     return this.prisma.playlist.findFirst({
       where: { channelId },
       include: { items: itemsArgs },
