@@ -12,6 +12,7 @@ import { PlaylistsModule } from './modules/playlists/playlists.module';
 import { SchedulesModule } from './modules/schedules/schedules.module';
 import { PlayoutModule } from './modules/playout/playout.module';
 import { OverlaysModule } from './modules/overlays/overlays.module';
+import { StreamOutputsModule } from './modules/stream-outputs/stream-outputs.module';
 
 @Module({
   imports: [
@@ -50,6 +51,7 @@ import { OverlaysModule } from './modules/overlays/overlays.module';
     SchedulesModule,
     PlayoutModule,
     OverlaysModule,
+    StreamOutputsModule,
     WorkerModule,
   ],
 })

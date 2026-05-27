@@ -6,14 +6,15 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { VideoStatus, OverlayType } from '@prisma/client';
-import type { Overlay } from '@prisma/client';
+import { VideoStatus, OverlayType, Platform } from '@prisma/client';
+import type { Overlay, StreamOutput } from '@prisma/client';
 import { spawn, ChildProcess } from 'child_process';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { OverlaysService } from '../overlays/overlays.service';
+import { StreamOutputsService } from '../stream-outputs/stream-outputs.service';
 
 interface PlayoutSession {
   channelId: string;
@@ -23,14 +24,22 @@ interface PlayoutSession {
   startedAt: Date;
   recentLogs: string[];
   restarts: number;
+  /** outputId → proceso FFmpeg de re-streaming RTMP */
+  rtmpProcs: Map<string, ChildProcess>;
 }
 
-const HLS_BASE = path.join('/tmp', 'cloudtv-hls');
-const MAX_LOGS = 300;
+const HLS_BASE   = path.join('/tmp', 'cloudtv-hls');
+const MAX_LOGS   = 300;
+const FONT       = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf';
+const FONT_BOLD  = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
 
-// Fuente monoespaciada instalada con fonts-dejavu-core
-const FONT      = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf';
-const FONT_BOLD = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
+/** URL base RTMP de cada plataforma conocida. */
+const RTMP_BASE: Record<string, string> = {
+  [Platform.YOUTUBE]:     'rtmp://a.rtmp.youtube.com/live2',
+  [Platform.FACEBOOK]:    'rtmps://live-api-s.facebook.com:443/rtmp',
+  [Platform.TWITCH]:      'rtmp://live.twitch.tv/app',
+  [Platform.RTMP_CUSTOM]: '',
+};
 
 @Injectable()
 export class PlayoutService implements OnModuleInit, OnModuleDestroy {
@@ -42,24 +51,28 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     private storage: StorageService,
     private config: ConfigService,
     private overlaysService: OverlaysService,
+    private streamOutputsService: StreamOutputsService,
   ) {}
 
-  /**
-   * Al iniciar el módulo, cualquier canal que quedó en estado activo
-   * (de un deploy anterior) se resetea a OFFLINE, porque los archivos
-   * HLS en /tmp y los procesos FFmpeg ya no existen.
-   */
+  // ─── Lifecycle ────────────────────────────────────────────────
+
   async onModuleInit() {
     try {
+      // Resetear canales activos (deploy anterior)
       const stale = await this.prisma.channel.updateMany({
         where: { status: { in: ['STARTING', 'LIVE_PLAYLIST', 'LIVE_RTMP'] } },
         data: { status: 'OFFLINE', hlsUrl: null },
       });
       if (stale.count > 0) {
-        this.logger.log(`Reseteados ${stale.count} canal(es) activos → OFFLINE (redeploy)`);
+        this.logger.log(`Reseteados ${stale.count} canal(es) → OFFLINE (redeploy)`);
       }
+      // Resetear salidas RTMP activas
+      await this.prisma.streamOutput.updateMany({
+        where: { status: { not: 'IDLE' } },
+        data: { status: 'IDLE' },
+      });
     } catch (err) {
-      this.logger.warn(`No se pudo resetear canales al inicio: ${err.message}`);
+      this.logger.warn(`onModuleInit reset error: ${err.message}`);
     }
   }
 
@@ -90,6 +103,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       startedAt: new Date(),
       recentLogs: [],
       restarts: 0,
+      rtmpProcs: new Map(),
     };
     this.sessions.set(channelId, session);
 
@@ -101,7 +115,6 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       },
     });
 
-    // No bloqueante
     this.launchFfmpeg(session).catch((err) => {
       this.log(session, `ERROR en launchFfmpeg: ${err.message}`);
     });
@@ -122,7 +135,13 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
   getStatus(channelId: string) {
     const s = this.sessions.get(channelId);
     if (!s) return null;
-    return { active: true, startedAt: s.startedAt, restarts: s.restarts, pid: s.process?.pid ?? null };
+    return {
+      active: true,
+      startedAt: s.startedAt,
+      restarts: s.restarts,
+      pid: s.process?.pid ?? null,
+      rtmpOutputs: s.rtmpProcs.size,
+    };
   }
 
   getHlsFilePath(channelId: string, filename: string): string | null {
@@ -136,11 +155,19 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     const session = this.sessions.get(channelId);
     if (session) {
       session.stopping = true;
+      // Matar proceso HLS principal
       this.killSession(session);
+      // Matar todos los procesos RTMP
+      for (const proc of session.rtmpProcs.values()) {
+        try { proc.kill('SIGTERM'); } catch { /* ok */ }
+      }
+      session.rtmpProcs.clear();
       this.sessions.delete(channelId);
       try { await fs.rm(session.hlsDir, { recursive: true, force: true }); } catch { /* ok */ }
     }
-    // Siempre forzar OFFLINE en la BD, incluso si no había sesión en memoria
+    // Resetear salidas RTMP en la BD
+    await this.streamOutputsService.resetStatusesForChannel(channelId).catch(() => {});
+    // Forzar OFFLINE
     await this.prisma.channel.update({
       where: { id: channelId },
       data: { status: 'OFFLINE', hlsUrl: null },
@@ -149,11 +176,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
   private killSession(s: PlayoutSession) {
     if (s.process && !s.process.killed) {
-      try { s.process.kill('SIGTERM'); } catch { /* ignorar */ }
+      try { s.process.kill('SIGTERM'); } catch { /* ok */ }
     }
   }
 
-  // ─── FFmpeg ────────────────────────────────────────────────────
+  // ─── FFmpeg HLS ────────────────────────────────────────────────
 
   private async launchFfmpeg(session: PlayoutSession): Promise<void> {
     if (session.stopping) return;
@@ -170,20 +197,16 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     }
     this.log(session, `Playlist: "${playlist.name}" — ${playlist.items.length} video(s)`);
 
-    // 2. Descargar MP4 de MinIO → disco local
+    // 2. Descargar MP4 → disco local
     const videosDir = path.join(session.hlsDir, 'videos');
     await fs.mkdir(videosDir, { recursive: true });
 
     const downloadedMp4s: string[] = [];
-
     for (let i = 0; i < playlist.items.length; i++) {
       if (session.stopping) return;
       const item = playlist.items[i];
       const key = item.video.processedKey ?? item.video.originalKey;
-      if (!key) {
-        this.log(session, `  WARN: video ${item.video.id} sin key, omitiendo`);
-        continue;
-      }
+      if (!key) { this.log(session, `  WARN: video ${item.video.id} sin key`); continue; }
       const mp4Path = path.join(videosDir, `${String(i).padStart(4, '0')}.mp4`);
       this.log(session, `  Descargando ${i + 1}/${playlist.items.length}: ${key}`);
       try {
@@ -202,8 +225,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     }
     if (session.stopping) return;
 
-    // 3. Preprocesar cada MP4 → MPEG-TS normalizado
-    //    Resuelve: H.264 AVCC→AnnexB, audio 7.1→stereo, timestamps DTS continuos
+    // 3. Normalizar cada MP4 → MPEG-TS
     const tsFiles: string[] = [];
     const scale = this.config.get('FFMPEG_SCALE', '854:480');
 
@@ -220,17 +242,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           '-c:v', 'libx264',
           '-preset', this.config.get('FFMPEG_PRESET', 'ultrafast'),
           '-crf', '26',
-          '-b:v', '1000k',
-          '-maxrate', '1200k',
-          '-bufsize', '2000k',
-          '-g', '50',
-          '-sc_threshold', '0',
-          '-c:a', 'aac',
-          '-b:a', '96k',
-          '-ar', '44100',
-          '-ac', '2',
-          '-f', 'mpegts',
-          '-y', tsPath,
+          '-b:v', '1000k', '-maxrate', '1200k', '-bufsize', '2000k',
+          '-g', '50', '-sc_threshold', '0',
+          '-c:a', 'aac', '-b:a', '96k', '-ar', '44100', '-ac', '2',
+          '-f', 'mpegts', '-y', tsPath,
         ]);
         tsFiles.push(tsPath);
         this.log(session, `  ✓ normalizado: ${path.basename(tsPath)}`);
@@ -246,30 +261,25 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     }
     if (session.stopping) return;
 
-    // 4. Concat.txt con los MPEG-TS normalizados
+    // 4. concat.txt
     const concatPath = path.join(session.hlsDir, 'concat.txt');
-    const concatLines = tsFiles.map(f => `file '${f}'`);
-    await fs.writeFile(concatPath, concatLines.join('\n') + '\n');
+    await fs.writeFile(concatPath, tsFiles.map(f => `file '${f}'`).join('\n') + '\n');
     this.log(session, `concat.txt listo con ${tsFiles.length} archivos .ts`);
 
-    // 5. Cargar overlays habilitados para este canal
+    // 5. Overlays
     const overlays = await this.overlaysService.getEnabledForChannel(session.channelId);
     const overlayFilter = overlays.length > 0
       ? await this.buildOverlayFilter(session, overlays)
       : null;
 
-    if (overlayFilter) {
-      this.log(session, `Overlays activos: ${overlays.length} → modo filter_complex (re-encode)`);
-    } else {
-      this.log(session, `Sin overlays → modo stream copy (rápido)`);
-    }
+    this.log(session, overlayFilter
+      ? `Overlays activos: ${overlays.length} → filter_complex (re-encode)`
+      : 'Sin overlays → stream copy (rápido)');
 
-    // 6. FFmpeg principal: concat TS → HLS
-    //    omit_endlist: playlist abierta → loop seamless al reiniciar
-    //    epoch: segment IDs únicos entre reinicios
+    // 6. FFmpeg HLS principal
     const m3u8Path = path.join(session.hlsDir, 'index.m3u8');
 
-    const hlsOutputArgs = [
+    const hlsArgs = [
       '-f', 'hls',
       '-hls_time', '4',
       '-hls_list_size', '10',
@@ -277,46 +287,34 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       '-hls_start_number_source', 'epoch',
       '-hls_segment_type', 'mpegts',
       '-hls_segment_filename', 'seg%d.ts',
-      '-y',
-      'index.m3u8',
+      '-y', 'index.m3u8',
     ];
 
-    let args: string[];
-
-    if (!overlayFilter) {
-      // Fast path: sin re-encoding
-      args = [
-        '-loglevel', 'warning',
-        '-f', 'concat', '-safe', '0', '-i', concatPath,
-        '-c', 'copy',
-        ...hlsOutputArgs,
-      ];
-    } else {
-      // Re-encode con overlays via filter_complex
-      args = [
-        '-loglevel', 'warning',
-        '-f', 'concat', '-safe', '0', '-i', concatPath,
-        ...overlayFilter.extraInputArgs,     // -i logo1.png -i logo2.png ...
-        '-filter_complex', overlayFilter.filterComplex,
-        '-map', overlayFilter.videoMapLabel,
-        '-map', '0:a?',
-        '-c:v', 'libx264',
-        '-preset', this.config.get('FFMPEG_PRESET', 'ultrafast'),
-        '-crf', '26',
-        '-b:v', '1000k',
-        '-maxrate', '1200k',
-        '-bufsize', '2000k',
-        '-g', '50',
-        '-sc_threshold', '0',
-        '-c:a', 'aac',
-        '-b:a', '96k',
-        '-ar', '44100',
-        '-ac', '2',
-        ...hlsOutputArgs,
-      ];
-    }
+    const args: string[] = !overlayFilter
+      ? [
+          '-loglevel', 'warning',
+          '-f', 'concat', '-safe', '0', '-i', concatPath,
+          '-c', 'copy',
+          ...hlsArgs,
+        ]
+      : [
+          '-loglevel', 'warning',
+          '-f', 'concat', '-safe', '0', '-i', concatPath,
+          ...overlayFilter.extraInputArgs,
+          '-filter_complex', overlayFilter.filterComplex,
+          '-map', overlayFilter.videoMapLabel,
+          '-map', '0:a?',
+          '-c:v', 'libx264',
+          '-preset', this.config.get('FFMPEG_PRESET', 'ultrafast'),
+          '-crf', '26',
+          '-b:v', '1000k', '-maxrate', '1200k', '-bufsize', '2000k',
+          '-g', '50', '-sc_threshold', '0',
+          '-c:a', 'aac', '-b:a', '96k', '-ar', '44100', '-ac', '2',
+          ...hlsArgs,
+        ];
 
     this.log(session, `Lanzando FFmpeg HLS${overlayFilter ? ' + overlays' : ' (copy)'}...`);
+
     const proc = spawn('ffmpeg', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       cwd: session.hlsDir,
@@ -324,14 +322,14 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     session.process = proc;
 
     proc.stderr.on('data', (chunk: Buffer) => {
-      chunk.toString().split('\n').forEach((l) => {
+      chunk.toString().split('\n').forEach(l => {
         const t = l.trim();
         if (t) this.log(session, `ffmpeg: ${t}`);
       });
     });
 
     proc.on('spawn', () => {
-      this.log(session, `FFmpeg PID=${proc.pid} en marcha. Esperando index.m3u8...`);
+      this.log(session, `FFmpeg PID=${proc.pid}. Esperando index.m3u8...`);
       this.waitForM3u8(session, m3u8Path);
     });
 
@@ -341,6 +339,8 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       if (!session.stopping) {
         session.restarts++;
         this.log(session, `Loop: reinicio #${session.restarts} en 3s...`);
+        // Detener RTMP outputs antes de reiniciar
+        this.stopRtmpOutputs(session, false);
         setTimeout(() => this.launchFfmpeg(session), 3000);
       }
     });
@@ -356,193 +356,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  // ─── Overlay filter_complex builder ────────────────────────────
-
-  private async buildOverlayFilter(
-    session: PlayoutSession,
-    overlays: Overlay[],
-  ): Promise<{ filterComplex: string; extraInputArgs: string[]; videoMapLabel: string } | null> {
-    const enabled = [...overlays]
-      .filter(o => o.enabled)
-      .sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0));
-
-    if (!enabled.length) return null;
-
-    // Descargar logos al disco
-    const logoLocalPaths = new Map<string, string>();
-    for (const ov of enabled) {
-      if (ov.type === OverlayType.LOGO) {
-        const cfg = ov.config as any;
-        if (cfg?.imageKey) {
-          const localPath = path.join(session.hlsDir, `logo_${ov.id}.png`);
-          try {
-            await this.storage.downloadToFile(cfg.imageKey, localPath);
-            logoLocalPaths.set(ov.id, localPath);
-            this.log(session, `  ✓ Logo "${ov.name}" descargado`);
-          } catch (err: any) {
-            this.log(session, `  WARN: Logo "${ov.name}" falló descarga: ${err.message}`);
-          }
-        } else {
-          this.log(session, `  WARN: Logo "${ov.name}" sin imageKey — omitido`);
-        }
-      }
-    }
-
-    const filterParts: string[] = [];
-    const extraInputPaths: string[] = [];
-    let currentStream = '0:v';
-    let idx = 0;
-
-    for (const ov of enabled) {
-      const cfg = ov.config as any;
-      const nextStream = `ov${idx}`;
-
-      if (ov.type === OverlayType.LOGO) {
-        const localPath = logoLocalPaths.get(ov.id);
-        if (!localPath) continue; // sin imagen, saltar
-
-        const inputIdx = extraInputPaths.length + 1; // 0 = concat input
-        extraInputPaths.push(localPath);
-        const pos = this.logoXY(cfg);
-
-        if (cfg.width) {
-          const scaledLabel = `sc${idx}`;
-          filterParts.push(`[${inputIdx}:v]scale=${cfg.width}:-1[${scaledLabel}]`);
-          filterParts.push(`[${currentStream}][${scaledLabel}]overlay=${pos}[${nextStream}]`);
-        } else {
-          filterParts.push(`[${currentStream}][${inputIdx}:v]overlay=${pos}[${nextStream}]`);
-        }
-
-      } else if (ov.type === OverlayType.TEXT_STATIC) {
-        const text = this.escapeText(cfg.text ?? '');
-        const font = cfg.bold ? FONT_BOLD : FONT;
-        const fs2  = cfg.fontSize ?? 24;
-        const fc   = cfg.fontColor ?? 'white';
-        const pos  = this.textXY(cfg);
-        const box  = cfg.bgColor
-          ? `:box=1:boxcolor=${cfg.bgColor}:boxborderw=8`
-          : ':box=1:boxcolor=black@0.5:boxborderw=8';
-        filterParts.push(
-          `[${currentStream}]drawtext=fontfile=${font}:text=${text}:fontsize=${fs2}:fontcolor=${fc}:${pos}${box}[${nextStream}]`,
-        );
-
-      } else if (ov.type === OverlayType.CLOCK) {
-        const fmt  = cfg.format === 'datetime' ? '%d-%m-%Y %T' : '%T';
-        // %{localtime\:FORMAT} — la \: evita que FFmpeg lo interprete como separador de opción
-        const text = `%{localtime\\:${fmt}}`;
-        const font = FONT_BOLD;
-        const fs2  = cfg.fontSize ?? 28;
-        const fc   = cfg.fontColor ?? 'white';
-        const pos  = this.textXY(cfg);
-        const box  = cfg.bgColor
-          ? `:box=1:boxcolor=${cfg.bgColor}:boxborderw=10`
-          : ':box=1:boxcolor=black@0.6:boxborderw=10';
-        filterParts.push(
-          `[${currentStream}]drawtext=fontfile=${font}:text=${text}:fontsize=${fs2}:fontcolor=${fc}:${pos}${box}[${nextStream}]`,
-        );
-
-      } else if (ov.type === OverlayType.TEXT_SCROLL || ov.type === OverlayType.TICKER) {
-        const text   = this.escapeText(cfg.text ?? '');
-        const font   = FONT;
-        const fs2    = cfg.fontSize ?? 20;
-        const fc     = cfg.fontColor ?? 'white';
-        const speed  = cfg.speed ?? 80;
-        const barH   = cfg.barHeight ?? 36;
-        const isBot  = (cfg.position ?? 'bottom') !== 'top';
-        const barY   = isBot ? `H-${barH}` : '0';
-        // Centro vertical dentro de la barra
-        const textY  = isBot ? `H-${barH}+(${barH}-text_h)/2` : `(${barH}-text_h)/2`;
-        // Scroll de derecha a izquierda: x = W - (t*speed mod (W+text_w))
-        const scrollX = `W-mod(t*${speed}\\,W+text_w)`;
-        const bgColor = cfg.bgColor ?? 'black@0.7';
-        const barLabel = `bar${idx}`;
-
-        // 1) Banda de fondo (full width)
-        filterParts.push(
-          `[${currentStream}]drawbox=x=0:y=${barY}:w=W:h=${barH}:color=${bgColor}:t=fill[${barLabel}]`,
-        );
-        // 2) Texto scrolling sobre la banda
-        filterParts.push(
-          `[${barLabel}]drawtext=fontfile=${font}:text=${text}:fontsize=${fs2}:fontcolor=${fc}:x=${scrollX}:y=${textY}[${nextStream}]`,
-        );
-
-      } else {
-        continue; // tipo desconocido
-      }
-
-      currentStream = nextStream;
-      idx++;
-    }
-
-    if (!filterParts.length) return null;
-
-    return {
-      filterComplex: filterParts.join(';'),
-      extraInputArgs: extraInputPaths.flatMap(p => ['-i', p]),
-      videoMapLabel: `[${currentStream}]`,
-    };
-  }
-
-  // ─── Helpers para posiciones ───────────────────────────────────
-
-  /** Posición x:y para el filtro overlay= (imágenes logo) */
-  private logoXY(cfg: any): string {
-    const pad = 10;
-    switch (cfg.position ?? 'top-left') {
-      case 'top-right':    return `W-w-${pad}:${pad}`;
-      case 'bottom-left':  return `${pad}:H-h-${pad}`;
-      case 'bottom-right': return `W-w-${pad}:H-h-${pad}`;
-      case 'center':       return `(W-w)/2:(H-h)/2`;
-      case 'custom':       return `${cfg.x ?? pad}:${cfg.y ?? pad}`;
-      default:             return `${pad}:${pad}`; // top-left
-    }
-  }
-
-  /** Posición x=...:y=... para drawtext */
-  private textXY(cfg: any): string {
-    const pad = 10;
-    switch (cfg.position ?? 'top-left') {
-      case 'top-right':    return `x=W-text_w-${pad}:y=${pad}`;
-      case 'bottom-left':  return `x=${pad}:y=H-text_h-${pad}`;
-      case 'bottom-right': return `x=W-text_w-${pad}:y=H-text_h-${pad}`;
-      case 'center':       return `x=(W-text_w)/2:y=(H-text_h)/2`;
-      case 'custom':       return `x=${cfg.x ?? pad}:y=${cfg.y ?? pad}`;
-      default:             return `x=${pad}:y=${pad}`; // top-left
-    }
-  }
-
-  /** Escapar texto para el argumento text= de drawtext */
-  private escapeText(text: string): string {
-    return text
-      .replace(/\\/g, '\\\\')   // \ → \\
-      .replace(/'/g, "\\'")     // ' → \'
-      .replace(/:/g, '\\:')     // : → \:
-      .replace(/,/g, '\\,')     // , → \,
-      .replace(/\[/g, '\\[')    // [ → \[
-      .replace(/\]/g, '\\]');   // ] → \]
-  }
-
-  // ─── Ejecutar FFmpeg sincrónico (preproceso) ───────────────────
-
-  private runFfmpegSync(args: string[]): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
-      const errLines: string[] = [];
-      proc.stderr.on('data', (b: Buffer) =>
-        b.toString().split('\n').forEach(l => { if (l.trim()) errLines.push(l.trim()); })
-      );
-      proc.on('close', (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(errLines.slice(-5).join(' | ') || `exit ${code}`));
-      });
-      proc.on('error', reject);
-    });
-  }
-
   // ─── Polling m3u8 ──────────────────────────────────────────────
 
   private waitForM3u8(session: PlayoutSession, m3u8Path: string) {
-    const MAX_MS = 120_000;
+    const MAX_MS  = 120_000;
     const POLL_MS = 2_000;
     const t0 = Date.now();
 
@@ -556,10 +373,13 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
             data: { status: 'LIVE_PLAYLIST' },
           });
           this.log(session, '✓ index.m3u8 listo → LIVE_PLAYLIST');
+          // Arrancar salidas RTMP
+          this.startRtmpOutputs(session).catch(err =>
+            this.log(session, `RTMP init error: ${err.message}`),
+          );
         }
       } catch {
-        const elapsed = Date.now() - t0;
-        if (elapsed < MAX_MS) {
+        if (Date.now() - t0 < MAX_MS) {
           setTimeout(check, POLL_MS);
         } else {
           this.log(session, `TIMEOUT ${MAX_MS / 1000}s esperando index.m3u8`);
@@ -574,10 +394,250 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     setTimeout(check, POLL_MS);
   }
 
+  // ─── RTMP outputs ─────────────────────────────────────────────
+
+  private async startRtmpOutputs(session: PlayoutSession): Promise<void> {
+    if (session.stopping) return;
+    const outputs = await this.streamOutputsService.getEnabledForChannel(session.channelId);
+    if (!outputs.length) {
+      this.log(session, 'Sin salidas RTMP habilitadas');
+      return;
+    }
+    this.log(session, `Iniciando ${outputs.length} salida(s) RTMP...`);
+    for (const output of outputs) {
+      this.startSingleRtmpOutput(session, output);
+    }
+  }
+
+  private startSingleRtmpOutput(session: PlayoutSession, output: StreamOutput): void {
+    if (session.stopping) return;
+    if (session.rtmpProcs.has(output.id)) return; // ya corre
+
+    const target = this.buildRtmpTarget(output);
+    const m3u8   = path.join(session.hlsDir, 'index.m3u8');
+    // Ocultar stream key en los logs (mostrar solo los últimos 4 caracteres)
+    const safeName = `[${output.name}/${output.platform}]`;
+    const safeTarget = target.replace(/\/([^\/]+)$/, '/***');
+
+    const proc = spawn('ffmpeg', [
+      '-loglevel', 'warning',
+      '-re',
+      '-i', m3u8,
+      '-c', 'copy',
+      '-f', 'flv',
+      target,
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    session.rtmpProcs.set(output.id, proc);
+    this.log(session, `RTMP ${safeName} PID=${proc.pid} → ${safeTarget}`);
+
+    proc.stderr.on('data', (chunk: Buffer) => {
+      chunk.toString().split('\n').forEach(l => {
+        const t = l.trim();
+        if (t) this.log(session, `rtmp${safeName}: ${t}`);
+      });
+    });
+
+    proc.on('spawn', () => {
+      this.streamOutputsService.updateStatus(output.id, 'STREAMING').catch(() => {});
+    });
+
+    proc.on('close', async (code, sig) => {
+      session.rtmpProcs.delete(output.id);
+      this.log(session, `RTMP ${safeName} terminó (code=${code} sig=${sig})`);
+
+      if (!session.stopping) {
+        await this.streamOutputsService.updateStatus(output.id, 'ERROR').catch(() => {});
+        this.log(session, `RTMP ${safeName} reintentando en 10s...`);
+        setTimeout(() => {
+          if (!session.stopping) this.startSingleRtmpOutput(session, output);
+        }, 10_000);
+      } else {
+        await this.streamOutputsService.updateStatus(output.id, 'IDLE').catch(() => {});
+      }
+    });
+
+    proc.on('error', (err) => {
+      session.rtmpProcs.delete(output.id);
+      this.log(session, `RTMP ${safeName} spawn error: ${err.message}`);
+      this.streamOutputsService.updateStatus(output.id, 'ERROR').catch(() => {});
+    });
+  }
+
+  /** Detiene todos los procesos RTMP de la sesión.
+   *  @param updateDb si es true actualiza los estados en BD a IDLE. */
+  private stopRtmpOutputs(session: PlayoutSession, updateDb = true): void {
+    for (const [id, proc] of session.rtmpProcs) {
+      try { proc.kill('SIGTERM'); } catch { /* ok */ }
+      if (updateDb) {
+        this.streamOutputsService.updateStatus(id, 'IDLE').catch(() => {});
+      }
+    }
+    session.rtmpProcs.clear();
+  }
+
+  /** Construye la URL RTMP completa para el destino (base + stream key). */
+  private buildRtmpTarget(output: StreamOutput): string {
+    const base = (output.rtmpUrl?.trim() || RTMP_BASE[output.platform] || '').replace(/\/$/, '');
+    return output.streamKey ? `${base}/${output.streamKey}` : base;
+  }
+
+  // ─── Overlay filter_complex ────────────────────────────────────
+
+  private async buildOverlayFilter(
+    session: PlayoutSession,
+    overlays: Overlay[],
+  ): Promise<{ filterComplex: string; extraInputArgs: string[]; videoMapLabel: string } | null> {
+    const enabled = [...overlays]
+      .filter(o => o.enabled)
+      .sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0));
+    if (!enabled.length) return null;
+
+    const logoLocalPaths = new Map<string, string>();
+    for (const ov of enabled) {
+      if (ov.type === OverlayType.LOGO) {
+        const cfg = ov.config as any;
+        if (cfg?.imageKey) {
+          const localPath = path.join(session.hlsDir, `logo_${ov.id}.png`);
+          try {
+            await this.storage.downloadToFile(cfg.imageKey, localPath);
+            logoLocalPaths.set(ov.id, localPath);
+            this.log(session, `  ✓ Logo "${ov.name}" descargado`);
+          } catch (err: any) {
+            this.log(session, `  WARN: Logo "${ov.name}" falló descarga: ${err.message}`);
+          }
+        }
+      }
+    }
+
+    const filterParts: string[] = [];
+    const extraInputPaths: string[] = [];
+    let currentStream = '0:v';
+    let idx = 0;
+
+    for (const ov of enabled) {
+      const cfg        = ov.config as any;
+      const nextStream = `ov${idx}`;
+
+      if (ov.type === OverlayType.LOGO) {
+        const localPath = logoLocalPaths.get(ov.id);
+        if (!localPath) continue;
+        const inputIdx = extraInputPaths.length + 1;
+        extraInputPaths.push(localPath);
+        const pos = this.logoXY(cfg);
+        if (cfg.width) {
+          const sl = `sc${idx}`;
+          filterParts.push(`[${inputIdx}:v]scale=${cfg.width}:-1[${sl}]`);
+          filterParts.push(`[${currentStream}][${sl}]overlay=${pos}[${nextStream}]`);
+        } else {
+          filterParts.push(`[${currentStream}][${inputIdx}:v]overlay=${pos}[${nextStream}]`);
+        }
+
+      } else if (ov.type === OverlayType.TEXT_STATIC) {
+        const text = this.escapeText(cfg.text ?? '');
+        const font = cfg.bold ? FONT_BOLD : FONT;
+        const box  = `:box=1:boxcolor=${cfg.bgColor ?? 'black@0.5'}:boxborderw=8`;
+        filterParts.push(
+          `[${currentStream}]drawtext=fontfile=${font}:text=${text}:fontsize=${cfg.fontSize ?? 24}:fontcolor=${cfg.fontColor ?? 'white'}:${this.textXY(cfg)}${box}[${nextStream}]`,
+        );
+
+      } else if (ov.type === OverlayType.CLOCK) {
+        const fmt  = cfg.format === 'datetime' ? '%d-%m-%Y %T' : '%T';
+        const text = `%{localtime\\:${fmt}}`;
+        const box  = `:box=1:boxcolor=${cfg.bgColor ?? 'black@0.6'}:boxborderw=10`;
+        filterParts.push(
+          `[${currentStream}]drawtext=fontfile=${FONT_BOLD}:text=${text}:fontsize=${cfg.fontSize ?? 28}:fontcolor=${cfg.fontColor ?? 'white'}:${this.textXY(cfg)}${box}[${nextStream}]`,
+        );
+
+      } else if (ov.type === OverlayType.TEXT_SCROLL || ov.type === OverlayType.TICKER) {
+        const text    = this.escapeText(cfg.text ?? '');
+        const barH    = cfg.barHeight ?? 36;
+        const isBot   = (cfg.position ?? 'bottom') !== 'top';
+        const barY    = isBot ? `H-${barH}` : '0';
+        const textY   = isBot ? `H-${barH}+(${barH}-text_h)/2` : `(${barH}-text_h)/2`;
+        const scrollX = `W-mod(t*${cfg.speed ?? 80}\\,W+text_w)`;
+        const barLabel = `bar${idx}`;
+        filterParts.push(
+          `[${currentStream}]drawbox=x=0:y=${barY}:w=W:h=${barH}:color=${cfg.bgColor ?? 'black@0.7'}:t=fill[${barLabel}]`,
+        );
+        filterParts.push(
+          `[${barLabel}]drawtext=fontfile=${FONT}:text=${text}:fontsize=${cfg.fontSize ?? 20}:fontcolor=${cfg.fontColor ?? 'white'}:x=${scrollX}:y=${textY}[${nextStream}]`,
+        );
+
+      } else {
+        continue;
+      }
+
+      currentStream = nextStream;
+      idx++;
+    }
+
+    if (!filterParts.length) return null;
+
+    return {
+      filterComplex:  filterParts.join(';'),
+      extraInputArgs: extraInputPaths.flatMap(p => ['-i', p]),
+      videoMapLabel:  `[${currentStream}]`,
+    };
+  }
+
+  // ─── Helpers posición ──────────────────────────────────────────
+
+  private logoXY(cfg: any): string {
+    const p = 10;
+    switch (cfg.position ?? 'top-left') {
+      case 'top-right':    return `W-w-${p}:${p}`;
+      case 'bottom-left':  return `${p}:H-h-${p}`;
+      case 'bottom-right': return `W-w-${p}:H-h-${p}`;
+      case 'center':       return `(W-w)/2:(H-h)/2`;
+      case 'custom':       return `${cfg.x ?? p}:${cfg.y ?? p}`;
+      default:             return `${p}:${p}`;
+    }
+  }
+
+  private textXY(cfg: any): string {
+    const p = 10;
+    switch (cfg.position ?? 'top-left') {
+      case 'top-right':    return `x=W-text_w-${p}:y=${p}`;
+      case 'bottom-left':  return `x=${p}:y=H-text_h-${p}`;
+      case 'bottom-right': return `x=W-text_w-${p}:y=H-text_h-${p}`;
+      case 'center':       return `x=(W-text_w)/2:y=(H-text_h)/2`;
+      case 'custom':       return `x=${cfg.x ?? p}:y=${cfg.y ?? p}`;
+      default:             return `x=${p}:y=${p}`;
+    }
+  }
+
+  private escapeText(text: string): string {
+    return text
+      .replace(/\\/g, '\\\\')
+      .replace(/'/g, "\\'")
+      .replace(/:/g, '\\:')
+      .replace(/,/g, '\\,')
+      .replace(/\[/g, '\\[')
+      .replace(/\]/g, '\\]');
+  }
+
+  // ─── FFmpeg sincrónico (normalización) ───────────────────────
+
+  private runFfmpegSync(args: string[]): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+      const errLines: string[] = [];
+      proc.stderr.on('data', (b: Buffer) =>
+        b.toString().split('\n').forEach(l => { if (l.trim()) errLines.push(l.trim()); }),
+      );
+      proc.on('close', code => {
+        if (code === 0) resolve();
+        else reject(new Error(errLines.slice(-5).join(' | ') || `exit ${code}`));
+      });
+      proc.on('error', reject);
+    });
+  }
+
   // ─── Log helper ────────────────────────────────────────────────
 
   private log(session: PlayoutSession, msg: string) {
-    const ts = new Date().toISOString().slice(11, 23);
+    const ts   = new Date().toISOString().slice(11, 23);
     const line = `[${ts}] ${msg}`;
     session.recentLogs.push(line);
     if (session.recentLogs.length > MAX_LOGS) session.recentLogs.shift();
@@ -588,44 +648,29 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
   private async getActivePlaylist(channelId: string) {
     const now = new Date();
-
     const itemsArgs = {
       where: { video: { status: VideoStatus.READY } },
       orderBy: { order: 'asc' as const },
       include: {
         video: {
-          select: {
-            id: true,
-            originalKey: true,
-            processedKey: true,
-            duration: true,
-            status: true,
-          },
+          select: { id: true, originalKey: true, processedKey: true, duration: true, status: true },
         },
       },
     } as const;
 
-    // 1. Programa activo
     const schedule = await this.prisma.schedule.findFirst({
-      where: {
-        channelId,
-        playlistId: { not: null },
-        startTime: { lte: now },
-        endTime:   { gte: now },
-      },
+      where: { channelId, playlistId: { not: null }, startTime: { lte: now }, endTime: { gte: now } },
       orderBy: { priority: 'desc' },
       include: { playlist: { include: { items: itemsArgs } } },
     });
     if (schedule?.playlist?.items?.length) return schedule.playlist;
 
-    // 2. Default
     const def = await this.prisma.playlist.findFirst({
       where: { channelId, isDefault: true },
       include: { items: itemsArgs },
     });
     if (def?.items?.length) return def;
 
-    // 3. Primera disponible
     return this.prisma.playlist.findFirst({
       where: { channelId },
       include: { items: itemsArgs },
