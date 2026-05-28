@@ -347,11 +347,18 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         if (cached) {
           adDownloads.set(videoId, adPath);
         } else {
+          // Descargar a temporal → normalizar (AAC estéreo 44100Hz) → mover a caché final.
+          // La normalización garantiza audio compatible en todos los spots y evita el cuelgue
+          // del demuxer concat cuando el archivo tiene formato/codec distinto al contenido principal.
+          const tmpDl = `${adPath}.dl.tmp`;
           try {
-            await this.storage.downloadToFile(key, adPath);
+            await this.storage.downloadToFile(key, tmpDl);
+            await this.normalizeAdSpot(tmpDl, adPath);
+            try { await fs.unlink(tmpDl); } catch { /* ok */ }
             adDownloads.set(videoId, adPath);
-            this.log(session, `  ✓ Spot "${spot.name}" (${spot.advertiser})`);
+            this.log(session, `  ✓ Spot "${spot.name}" (${spot.advertiser}) normalizado`);
           } catch (err: any) {
+            try { await fs.unlink(tmpDl); } catch { /* ok */ }
             this.log(session, `  WARN: Spot "${spot.name}" no disponible: ${err.message}`);
           }
         }
@@ -441,7 +448,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       await insertBlock(scheduleEntry.postAdBlock, 'POST_ROLL');
     }
 
-    await fs.writeFile(concatPath, concatLines.join('\n') + '\n');
+    await fs.writeFile(concatPath, 'ffconcat version 1.0\n' + concatLines.join('\n') + '\n');
     this.log(
       session,
       `concat.txt: ${downloadedMp4s.length} video(s)${totalAdsInjected > 0 ? ` + ${totalAdsInjected} spot(s) publicitario(s)` : ' (sin publicidad)'}`,
@@ -505,7 +512,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     // Filtro de audio: convierte cualquier layout (mono, 5.1, 7.1, etc.) a estéreo
     // y resamplea async para compensar gaps causados por paquetes corruptos descartados.
     // Esto soluciona "channel element 1.6 is not allocated" en videos con audio 5.1.
-    const audioFilter = 'aformat=channel_layouts=stereo,aresample=async=1';
+    const audioFilter = 'aformat=channel_layouts=stereo,aresample=async=1000';
 
     // Para el camino con overlays: el audio se incluye dentro del mismo filter_complex
     // (video overlay chain + audio downmix chain en paralelo, separados por ';')
@@ -1100,6 +1107,66 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         },
       },
     });
+  }
+
+  /**
+   * Normaliza un spot publicitario para garantizar compatibilidad con el concat demuxer:
+   *   - Stream-copy de video (rápido, no re-encode)
+   *   - Audio re-codificado a AAC estéreo 44100 Hz
+   *   - Si el archivo no tiene pista de audio, agrega silencio para evitar que el
+   *     demuxer se quede esperando un stream de audio que nunca llega.
+   *
+   * Se llama UNA vez por spot al descargar; el resultado queda en caché.
+   */
+  private async normalizeAdSpot(inputPath: string, outputPath: string): Promise<void> {
+    const runFfmpeg = (extraArgs: string[]) =>
+      new Promise<boolean>((resolve) => {
+        const proc = spawn(
+          'ffmpeg',
+          ['-y', '-loglevel', 'error', '-i', inputPath, ...extraArgs, outputPath],
+          { stdio: ['ignore', 'ignore', 'pipe'] },
+        );
+        proc.on('close', (code) => resolve(code === 0));
+        proc.on('error', () => resolve(false));
+      });
+
+    // Intento 1: stream-copy video + re-encode audio existente a AAC estéreo 44100 Hz
+    const ok = await runFfmpeg([
+      '-c:v', 'copy',
+      '-c:a', 'aac', '-ar', '44100', '-ac', '2',
+      '-map', '0:v:0',
+      '-map', '0:a:0',
+      '-movflags', '+faststart',
+    ]);
+
+    if (!ok) {
+      // Intento 2: el spot no tiene pista de audio → agregar silencio sintético
+      // para que concat demuxer encuentre un stream de audio en todos los archivos.
+      const ok2 = await new Promise<boolean>((resolve) => {
+        const proc = spawn(
+          'ffmpeg',
+          [
+            '-y', '-loglevel', 'error',
+            '-i', inputPath,
+            '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+            '-c:v', 'copy',
+            '-c:a', 'aac', '-ar', '44100', '-ac', '2',
+            '-map', '0:v:0',
+            '-map', '1:a',
+            '-shortest',
+            '-movflags', '+faststart',
+            outputPath,
+          ],
+          { stdio: ['ignore', 'ignore', 'pipe'] },
+        );
+        proc.on('close', (code) => resolve(code === 0));
+        proc.on('error', () => resolve(false));
+      });
+
+      if (!ok2) {
+        throw new Error(`normalizeAdSpot falló para ${inputPath}`);
+      }
+    }
   }
 
   // ─── Playlist activa ───────────────────────────────────────────
