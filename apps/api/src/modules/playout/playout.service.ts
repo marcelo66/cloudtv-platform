@@ -266,7 +266,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     if (session.stopping) return;
 
     // 3. Tandas publicitarias: obtener cue points activos y descargar spots
-    const cuePoints = await this.adBlocksService.getCuePointsForPlayout(session.channelId).catch(() => []);
+    const cuePoints: CuePointForPlayout[] = await this.adBlocksService.getCuePointsForPlayout(session.channelId).catch((): CuePointForPlayout[] => []);
     const adDownloads = new Map<string, string>(); // videoId → localPath
 
     if (cuePoints.length > 0) {
