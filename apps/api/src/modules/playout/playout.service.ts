@@ -15,7 +15,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { OverlaysService } from '../overlays/overlays.service';
 import { StreamOutputsService } from '../stream-outputs/stream-outputs.service';
-import { AdBlocksService, CuePointForPlayout, AdSpotWithVideo } from '../ad-blocks/ad-blocks.service';
+import { AdBlocksService, AdBlockForPlayout, CuePointForPlayout, AdSpotWithVideo } from '../ad-blocks/ad-blocks.service';
 
 interface PlayoutSession {
   channelId: string;
