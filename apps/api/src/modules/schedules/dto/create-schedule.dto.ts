@@ -29,4 +29,14 @@ export class CreateScheduleDto {
   @Min(0)
   @IsOptional()
   priority?: number;
+
+  /** ID de la tanda a emitir antes del programa */
+  @IsString()
+  @IsOptional()
+  preAdBlockId?: string;
+
+  /** ID de la tanda a emitir después del programa */
+  @IsString()
+  @IsOptional()
+  postAdBlockId?: string;
 }

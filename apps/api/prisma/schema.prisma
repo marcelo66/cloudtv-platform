@@ -52,10 +52,14 @@ model Channel {
   status       ChannelStatus @default(OFFLINE)
   streamKey    String        @unique @map("stream_key") @default(cuid())
   hlsUrl       String?       @map("hls_url")
-  videoQuality String        @default("480p") @map("video_quality")
+  videoQuality      String        @default("480p") @map("video_quality")
   // Valores: 480p | 720p | 1080p
-  createdAt    DateTime      @default(now()) @map("created_at")
-  updatedAt    DateTime      @updatedAt @map("updated_at")
+  // ─── Publicidad automática por intervalo ───────────────────
+  adIntervalMinutes Int?          @map("ad_interval_minutes")
+  adIntervalBlockId String?       @map("ad_interval_block_id")
+  adIntervalBlock   AdBlock?      @relation("ChannelAdInterval", fields: [adIntervalBlockId], references: [id])
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
 
   videos        Video[]
   playlists     Playlist[]
@@ -147,9 +151,14 @@ model Schedule {
   name       String
   startTime  DateTime   @map("start_time")
   endTime    DateTime   @map("end_time")
-  recurrence Recurrence @default(ONCE)
-  priority   Int        @default(0)
-  createdAt  DateTime   @default(now()) @map("created_at")
+  recurrence    Recurrence @default(ONCE)
+  priority      Int        @default(0)
+  // ─── Tandas ancladas al programa ───────────────────────────
+  preAdBlockId  String?    @map("pre_ad_block_id")
+  postAdBlockId String?    @map("post_ad_block_id")
+  preAdBlock    AdBlock?   @relation("SchedulePreAd",  fields: [preAdBlockId],  references: [id])
+  postAdBlock   AdBlock?   @relation("SchedulePostAd", fields: [postAdBlockId], references: [id])
+  createdAt     DateTime   @default(now()) @map("created_at")
 
   @@map("schedules")
 }
@@ -206,6 +215,10 @@ model AdBlock {
   spots       AdSpot[]
   cuePoints   CuePoint[]
   impressions AdImpression[]
+  // Reverse relations para intervalo de canal y tandas de programa
+  intervalChannels Channel[]   @relation("ChannelAdInterval")
+  preSchedules     Schedule[]  @relation("SchedulePreAd")
+  postSchedules    Schedule[]  @relation("SchedulePostAd")
 
   @@map("ad_blocks")
 }

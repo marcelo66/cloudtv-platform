@@ -1,9 +1,10 @@
 'use client';
 
 import { useState } from 'react';
-import { X, CalendarClock } from 'lucide-react';
+import { X, CalendarClock, Clapperboard } from 'lucide-react';
 import { useCreateSchedule } from '@/hooks/useSchedules';
 import { usePlaylists } from '@/hooks/usePlaylists';
+import { useAdBlocks } from '@/hooks/useAdBlocks';
 
 interface Props {
   channelId: string;
@@ -33,6 +34,7 @@ function toLocalDatetimeValue(iso?: string): string {
 export function CreateScheduleModal({ channelId, initialStart, onClose }: Props) {
   const create = useCreateSchedule();
   const { data: playlists = [] } = usePlaylists(channelId);
+  const { data: adBlocks = [] } = useAdBlocks(channelId);
 
   const defaultStart = toLocalDatetimeValue(initialStart);
   const defaultEnd = (() => {
@@ -47,6 +49,8 @@ export function CreateScheduleModal({ channelId, initialStart, onClose }: Props)
   const [endTime, setEndTime] = useState(defaultEnd);
   const [recurrence, setRecurrence] = useState('ONCE');
   const [priority, setPriority] = useState(0);
+  const [preAdBlockId, setPreAdBlockId] = useState('');
+  const [postAdBlockId, setPostAdBlockId] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -59,6 +63,8 @@ export function CreateScheduleModal({ channelId, initialStart, onClose }: Props)
       endTime: new Date(endTime).toISOString(),
       recurrence,
       priority,
+      preAdBlockId:  preAdBlockId  || undefined,
+      postAdBlockId: postAdBlockId || undefined,
     });
     onClose();
   };
@@ -181,6 +187,53 @@ export function CreateScheduleModal({ channelId, initialStart, onClose }: Props)
               className={inputClass}
             />
           </div>
+
+          {/* Publicidad del programa */}
+          {adBlocks.length > 0 && (
+            <div className="rounded-xl border border-white/8 bg-surface-700/30 p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <Clapperboard className="w-3.5 h-3.5 text-amber-400" />
+                <span className="text-xs font-semibold text-slate-300">Publicidad del programa</span>
+                <span className="text-[10px] text-slate-600 ml-auto">opcional</span>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-500 mb-1">
+                    Tanda al inicio
+                  </label>
+                  <select
+                    value={preAdBlockId}
+                    onChange={(e) => setPreAdBlockId(e.target.value)}
+                    className={inputClass}
+                  >
+                    <option value="">— Sin tanda —</option>
+                    {adBlocks.map((b) => (
+                      <option key={b.id} value={b.id}>{b.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-500 mb-1">
+                    Tanda al final
+                  </label>
+                  <select
+                    value={postAdBlockId}
+                    onChange={(e) => setPostAdBlockId(e.target.value)}
+                    className={inputClass}
+                  >
+                    <option value="">— Sin tanda —</option>
+                    {adBlocks.map((b) => (
+                      <option key={b.id} value={b.id}>{b.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <p className="text-[10px] text-slate-600 leading-relaxed">
+                La tanda al inicio se emite justo antes de que arranque el programa.
+                La del final, inmediatamente después. El contenido continúa sin cortes.
+              </p>
+            </div>
+          )}
 
           {/* Actions */}
           <div className="flex gap-3 pt-2">

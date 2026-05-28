@@ -19,6 +19,8 @@ import {
   Tv,
   Terminal,
   Gauge,
+  Clapperboard,
+  Timer,
 } from 'lucide-react';
 import { Header } from '@/components/dashboard/Header';
 import apiClient from '@/lib/api-client';
@@ -33,6 +35,7 @@ import {
   useDeleteChannel,
 } from '@/hooks/useChannels';
 import { useSchedules } from '@/hooks/useSchedules';
+import { useAdBlocks } from '@/hooks/useAdBlocks';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 
@@ -136,6 +139,14 @@ const QUALITY_PRESETS = [
 
 // ─── component ────────────────────────────────────────────────────────────────
 
+const AD_INTERVAL_OPTIONS = [
+  { value: 15,  label: 'Cada 15 min' },
+  { value: 20,  label: 'Cada 20 min' },
+  { value: 30,  label: 'Cada 30 min' },
+  { value: 45,  label: 'Cada 45 min' },
+  { value: 60,  label: 'Cada 60 min' },
+];
+
 export default function ChannelPage() {
   const { data: channels = [], isLoading: loadingChannels } = useChannels();
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -146,6 +157,10 @@ export default function ChannelPage() {
   const [confirmStop, setConfirmStop] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showFullKey, setShowFullKey] = useState(false);
+  // Intervalo automático de publicidad
+  const [adIntervalEnabled, setAdIntervalEnabled] = useState(false);
+  const [adIntervalMinutes, setAdIntervalMinutes] = useState(30);
+  const [adIntervalBlockId, setAdIntervalBlockId] = useState('');
 
   // Auto-select first channel
   useEffect(() => {
@@ -155,12 +170,16 @@ export default function ChannelPage() {
   }, [channels, selectedId]);
 
   const { data: channel, isLoading: loadingChannel } = useChannel(selectedId);
+  const { data: adBlocks = [] } = useAdBlocks(selectedId);
 
   // Sync edit fields
   useEffect(() => {
     if (channel) {
       setEditName(channel.name);
       setEditDesc(channel.description ?? '');
+      setAdIntervalEnabled(!!channel.adIntervalMinutes);
+      setAdIntervalMinutes(channel.adIntervalMinutes ?? 30);
+      setAdIntervalBlockId(channel.adIntervalBlockId ?? '');
     }
   }, [channel?.id]);
 
@@ -192,6 +211,19 @@ export default function ChannelPage() {
   const handleQualityChange = (q: string) => {
     if (!selectedId || q === channel?.videoQuality) return;
     update.mutate({ id: selectedId, data: { videoQuality: q } });
+  };
+
+  const handleSaveAdInterval = () => {
+    if (!selectedId) return;
+    update.mutate({
+      id: selectedId,
+      data: {
+        adIntervalMinutes:  adIntervalEnabled ? adIntervalMinutes : null,
+        adIntervalBlockId:  adIntervalEnabled && adIntervalBlockId ? adIntervalBlockId : null,
+      },
+    }, {
+      onSuccess: () => toast.success(adIntervalEnabled ? 'Intervalo de publicidad guardado' : 'Intervalo desactivado'),
+    });
   };
 
   const handleRegenKey = () => {
@@ -717,6 +749,111 @@ export default function ChannelPage() {
               <p className="text-xs text-slate-500 leading-relaxed">
                 El cambio aplica al <span className="text-slate-400">reiniciar el canal</span>. Si el canal está en vivo, detenelo y volvé a iniciarlo para que tome efecto la nueva calidad.
               </p>
+            </div>
+
+            {/* Ad interval */}
+            <div className="glass-card p-5 space-y-4 lg:col-span-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Timer className="w-4 h-4 text-amber-400" />
+                  <h3 className="text-sm font-semibold text-white">Publicidad automática</h3>
+                </div>
+                {/* Toggle */}
+                <button
+                  onClick={() => setAdIntervalEnabled((v) => !v)}
+                  className={cn(
+                    'relative inline-flex h-5 w-9 items-center rounded-full transition-colors',
+                    adIntervalEnabled ? 'bg-amber-500' : 'bg-surface-600',
+                  )}
+                >
+                  <span
+                    className={cn(
+                      'inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform',
+                      adIntervalEnabled ? 'translate-x-4' : 'translate-x-1',
+                    )}
+                  />
+                </button>
+              </div>
+
+              {adIntervalEnabled ? (
+                <div className="space-y-3">
+                  <p className="text-xs text-slate-500">
+                    Inserta automáticamente una tanda cada cierto tiempo de contenido emitido.
+                    El corte ocurre siempre en la transición entre videos, nunca a mitad de uno.
+                  </p>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-400 mb-1.5">
+                        Intervalo
+                      </label>
+                      <select
+                        value={adIntervalMinutes}
+                        onChange={(e) => setAdIntervalMinutes(Number(e.target.value))}
+                        className="w-full px-3 py-2 rounded-lg text-sm bg-surface-700 border border-white/10 text-white focus:outline-none focus:ring-1 focus:ring-amber-500/50 focus:border-amber-500 transition-colors"
+                      >
+                        {AD_INTERVAL_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>{o.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-400 mb-1.5">
+                        Tanda a emitir
+                      </label>
+                      <select
+                        value={adIntervalBlockId}
+                        onChange={(e) => setAdIntervalBlockId(e.target.value)}
+                        className="w-full px-3 py-2 rounded-lg text-sm bg-surface-700 border border-white/10 text-white focus:outline-none focus:ring-1 focus:ring-amber-500/50 focus:border-amber-500 transition-colors"
+                      >
+                        <option value="">— Seleccionar tanda —</option>
+                        {adBlocks.map((b) => (
+                          <option key={b.id} value={b.id}>{b.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {adBlocks.length === 0 && (
+                    <p className="text-xs text-amber-500/70">
+                      No hay tandas creadas. Creá una en la sección <span className="text-amber-400">Publicidad</span>.
+                    </p>
+                  )}
+
+                  <div className="flex items-center justify-between pt-1">
+                    <div className="flex items-center gap-1.5">
+                      <Clapperboard className="w-3.5 h-3.5 text-amber-400/60" />
+                      <span className="text-xs text-slate-500">
+                        {adIntervalBlockId
+                          ? `"${adBlocks.find(b => b.id === adIntervalBlockId)?.name}" cada ${adIntervalMinutes} min`
+                          : 'Seleccioná una tanda para activar'}
+                      </span>
+                    </div>
+                    <button
+                      onClick={handleSaveAdInterval}
+                      disabled={update.isPending || (adIntervalEnabled && !adIntervalBlockId)}
+                      className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <Save className="w-3.5 h-3.5" />
+                      Guardar
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between">
+                  <p className="text-xs text-slate-500">
+                    Desactivado — activá el interruptor para configurar la inserción automática de publicidad.
+                  </p>
+                  <button
+                    onClick={handleSaveAdInterval}
+                    disabled={update.isPending || channel?.adIntervalMinutes == null}
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-slate-400 border border-white/10 hover:border-white/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    Desactivar
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Danger zone */}

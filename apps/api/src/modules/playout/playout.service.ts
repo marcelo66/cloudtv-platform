@@ -33,6 +33,12 @@ interface PlayoutSession {
   overlaysDisabled: boolean;
   /** Incrementa con cada nuevo lanzamiento FFmpeg para cancelar polls anteriores */
   pollToken: number;
+  /** ID del schedule activo en el último lanzamiento (para detectar cambios) */
+  activeScheduleId: string | null;
+  /** true → el schedule cambió mientras corría; reiniciar sin contar como fallo */
+  scheduleChangePending: boolean;
+  /** Timer del watcher de schedule */
+  scheduleWatchTimer: ReturnType<typeof setTimeout> | null;
 }
 
 const HLS_BASE    = path.join('/tmp', 'cloudtv-hls');
@@ -125,6 +131,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       rtmpRetries: new Map(),
       overlaysDisabled: false,
       pollToken: 0,
+      activeScheduleId: null,
+      scheduleChangePending: false,
+      scheduleWatchTimer: null,
     };
     this.sessions.set(channelId, session);
 
@@ -176,6 +185,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     const session = this.sessions.get(channelId);
     if (session) {
       session.stopping = true;
+      // Cancelar watcher de schedule
+      if (session.scheduleWatchTimer) {
+        clearTimeout(session.scheduleWatchTimer);
+        session.scheduleWatchTimer = null;
+      }
       // Matar proceso HLS principal
       this.killSession(session);
       // Matar todos los procesos RTMP
@@ -265,38 +279,78 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     }
     if (session.stopping) return;
 
-    // 3. Tandas publicitarias: obtener cue points activos y descargar spots
-    const cuePoints: CuePointForPlayout[] = await this.adBlocksService.getCuePointsForPlayout(session.channelId).catch((): CuePointForPlayout[] => []);
-    const adDownloads = new Map<string, string>(); // videoId → localPath
+    // ── 3. Publicidad: cue points + schedule + intervalo de canal ───────────────
 
-    if (cuePoints.length > 0) {
-      this.log(session, `Publicidad: ${cuePoints.length} cue point(s) activo(s)`);
+    // 3a. Cue points (publicidad a nivel de video)
+    const cuePoints: CuePointForPlayout[] = await this.adBlocksService
+      .getCuePointsForPlayout(session.channelId)
+      .catch((): CuePointForPlayout[] => []);
+
+    // 3b. Schedule activo — pre/post-tanda del programa
+    const scheduleEntry = await this.getActiveScheduleEntry(session.channelId);
+    session.activeScheduleId = scheduleEntry?.id ?? null;
+    if (scheduleEntry) {
+      const adInfo = [
+        scheduleEntry.preAdBlock  ? `pre="${scheduleEntry.preAdBlock.name}"` : null,
+        scheduleEntry.postAdBlock ? `post="${scheduleEntry.postAdBlock.name}"` : null,
+      ].filter(Boolean).join(', ');
+      if (adInfo) this.log(session, `Programa activo: "${scheduleEntry.name}" → tandas: ${adInfo}`);
+    }
+
+    // 3c. Intervalo automático del canal
+    const channelAdConfig = await this.prisma.channel.findUnique({
+      where: { id: session.channelId },
+      select: {
+        adIntervalMinutes: true,
+        adIntervalBlock: {
+          include: {
+            spots: {
+              where: { isActive: true },
+              include: { video: { select: { id: true, originalKey: true, processedKey: true, duration: true, status: true } } },
+              orderBy: { order: 'asc' },
+            },
+          },
+        },
+      },
+    });
+    const intervalSeconds = channelAdConfig?.adIntervalMinutes
+      ? channelAdConfig.adIntervalMinutes * 60
+      : null;
+    const intervalBlock = channelAdConfig?.adIntervalBlock ?? null;
+    if (intervalSeconds && intervalBlock) {
+      this.log(session, `Intervalo automático cada ${channelAdConfig!.adIntervalMinutes}min → "${intervalBlock.name}"`);
+    }
+
+    // 3d. Recopilar todos los spots únicos de TODAS las fuentes y descargar
+    const allSpots = new Map<string, AdSpotWithVideo>();
+
+    const collectSpots = (spots: AdSpotWithVideo[]) => {
+      for (const s of spots) if (!allSpots.has(s.videoId)) allSpots.set(s.videoId, s);
+    };
+
+    for (const cp of cuePoints) collectSpots(cp.adBlock.spots as AdSpotWithVideo[]);
+    if (scheduleEntry?.preAdBlock)  collectSpots(scheduleEntry.preAdBlock.spots  as AdSpotWithVideo[]);
+    if (scheduleEntry?.postAdBlock) collectSpots(scheduleEntry.postAdBlock.spots as AdSpotWithVideo[]);
+    if (intervalBlock)              collectSpots(intervalBlock.spots as AdSpotWithVideo[]);
+
+    const adDownloads = new Map<string, string>(); // videoId → localPath
+    if (allSpots.size > 0) {
       const adsDir = path.join(session.hlsDir, 'ads');
       await fs.mkdir(adsDir, { recursive: true });
-
-      // Recopilar spots únicos de todos los cue points
-      const allSpots = new Map<string, AdSpotWithVideo>();
-      for (const cp of cuePoints) {
-        for (const spot of cp.adBlock.spots) {
-          if (!allSpots.has(spot.videoId)) allSpots.set(spot.videoId, spot);
-        }
-      }
-
-      // Descargar spots (reutiliza caché si existen)
       for (const [videoId, spot] of allSpots) {
         if (session.stopping) return;
         const key = spot.video.processedKey ?? spot.video.originalKey;
         if (!key) continue;
         const adPath = path.join(adsDir, `spot_${videoId}.mp4`);
         let cached = false;
-        try { await fs.access(adPath); cached = true; } catch {}
+        try { await fs.access(adPath); cached = true; } catch { /* no existe */ }
         if (cached) {
           adDownloads.set(videoId, adPath);
         } else {
           try {
             await this.storage.downloadToFile(key, adPath);
             adDownloads.set(videoId, adPath);
-            this.log(session, `  ✓ Spot "${spot.name}" (${spot.advertiser}) descargado`);
+            this.log(session, `  ✓ Spot "${spot.name}" (${spot.advertiser})`);
           } catch (err: any) {
             this.log(session, `  WARN: Spot "${spot.name}" no disponible: ${err.message}`);
           }
@@ -305,17 +359,41 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     }
     if (session.stopping) return;
 
-    // 4. Construir concat.txt con inyección de publicidad
+    // ── 4. Construir concat.txt ──────────────────────────────────────────────────
+
     const concatPath = path.join(session.hlsDir, 'concat.txt');
     const concatLines: string[] = [];
     let totalAdsInjected = 0;
+    let intervalElapsed = 0; // segundos de contenido acumulados desde la última tanda de intervalo
 
+    /** Inserta los spots rotados de un bloque en concatLines (fire-and-forget para impresiones) */
+    const insertBlock = async (adBlock: any, type: string) => {
+      const spots = await this.adBlocksService.getRotatedSpots(adBlock as AdBlockForPlayout);
+      for (const spot of spots) {
+        const adPath = adDownloads.get(spot.videoId);
+        if (!adPath) continue;
+        concatLines.push(`file '${adPath}'`);
+        totalAdsInjected++;
+        this.adBlocksService.recordImpression(
+          spot.id, adBlock.id, session.channelId,
+          spot.advertiser, type, spot.video.duration,
+        ).catch(() => {});
+      }
+    };
+
+    // 4a. Pre-tanda del programa (schedule)
+    if (scheduleEntry?.preAdBlock) {
+      await insertBlock(scheduleEntry.preAdBlock, 'PRE_ROLL');
+    }
+
+    // 4b. Contenido: videos con cue-points y cortes de intervalo automático
     for (let i = 0; i < playlist.items.length; i++) {
-      const item = playlist.items[i];
+      const item    = playlist.items[i];
       const mp4Path = downloadedMp4s[i];
-      const videoId = item.video.id;
+      if (!mp4Path) continue;
+      const videoId      = item.video.id;
+      const videoDuration = item.video.duration ?? 0;
 
-      // Obtener cue points activos para este video
       const videoCues = cuePoints.filter((cp) => cp.videoId === videoId);
       const preRolls  = videoCues.filter((cp) => cp.type === 'PRE_ROLL');
       const postRolls = videoCues.filter((cp) => cp.type === 'POST_ROLL');
@@ -323,79 +401,50 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         .filter((cp) => cp.type === 'MID_ROLL' && cp.timeOffset != null)
         .sort((a, b) => (a.timeOffset ?? 0) - (b.timeOffset ?? 0));
 
-      // PRE_ROLL: spots antes del video
-      for (const cp of preRolls) {
-        const spots = await this.adBlocksService.getRotatedSpots(cp.adBlock as any);
-        for (const spot of spots) {
-          const adPath = adDownloads.get(spot.videoId);
-          if (!adPath) continue;
-          concatLines.push(`file '${adPath}'`);
-          totalAdsInjected++;
-          // Registrar impresión (fire-and-forget)
-          this.adBlocksService.recordImpression(
-            spot.id, cp.adBlock.id, session.channelId,
-            spot.advertiser, 'PRE_ROLL', spot.video.duration,
-          ).catch(() => {});
-        }
-      }
+      // PRE_ROLL de cue points
+      for (const cp of preRolls) await insertBlock(cp.adBlock, 'PRE_ROLL');
 
-      // Video principal con posibles MID_ROLLs
+      // Video principal (con posibles MID_ROLLs de cue points)
       if (midRolls.length === 0) {
-        // Sin mid-roll: entrada simple
         concatLines.push(`file '${mp4Path}'`);
         if (item.trimStart) concatLines.push(`inpoint ${item.trimStart}`);
         if (item.trimEnd)   concatLines.push(`outpoint ${item.trimEnd}`);
       } else {
-        // Con mid-roll: partir el video en segmentos e insertar tandas
         let inpoint: number = item.trimStart ?? 0;
         for (const cp of midRolls) {
           const outpoint = cp.timeOffset!;
-          // Segmento hasta el mid-roll
           concatLines.push(`file '${mp4Path}'`);
-          if (inpoint > 0)  concatLines.push(`inpoint ${inpoint}`);
+          if (inpoint > 0) concatLines.push(`inpoint ${inpoint}`);
           concatLines.push(`outpoint ${outpoint}`);
-          // Spots del mid-roll
-          const spots = await this.adBlocksService.getRotatedSpots(cp.adBlock as any);
-          for (const spot of spots) {
-            const adPath = adDownloads.get(spot.videoId);
-            if (!adPath) continue;
-            concatLines.push(`file '${adPath}'`);
-            totalAdsInjected++;
-            this.adBlocksService.recordImpression(
-              spot.id, cp.adBlock.id, session.channelId,
-              spot.advertiser, 'MID_ROLL', spot.video.duration,
-            ).catch(() => {});
-          }
+          await insertBlock(cp.adBlock, 'MID_ROLL');
           inpoint = outpoint;
         }
-        // Segmento final tras el último mid-roll
         concatLines.push(`file '${mp4Path}'`);
-        if (inpoint > 0) concatLines.push(`inpoint ${inpoint}`);
-        if (item.trimEnd) concatLines.push(`outpoint ${item.trimEnd}`);
+        if (inpoint > 0)   concatLines.push(`inpoint ${inpoint}`);
+        if (item.trimEnd)  concatLines.push(`outpoint ${item.trimEnd}`);
       }
 
-      // POST_ROLL: spots después del video
-      for (const cp of postRolls) {
-        const spots = await this.adBlocksService.getRotatedSpots(cp.adBlock as any);
-        for (const spot of spots) {
-          const adPath = adDownloads.get(spot.videoId);
-          if (!adPath) continue;
-          concatLines.push(`file '${adPath}'`);
-          totalAdsInjected++;
-          this.adBlocksService.recordImpression(
-            spot.id, cp.adBlock.id, session.channelId,
-            spot.advertiser, 'POST_ROLL', spot.video.duration,
-          ).catch(() => {});
-        }
-      }
+      // POST_ROLL de cue points
+      for (const cp of postRolls) await insertBlock(cp.adBlock, 'POST_ROLL');
 
-      // Si no hubo ningún cue point para este video ni trim, entrada simple ya hecha arriba
+      // Intervalo automático: acumular duración real de contenido
+      intervalElapsed += videoDuration;
+      if (intervalSeconds && intervalElapsed >= intervalSeconds && intervalBlock) {
+        this.log(session, `Tanda automática tras ${(intervalElapsed / 60).toFixed(1)}min de contenido`);
+        await insertBlock(intervalBlock, 'MID_ROLL');
+        intervalElapsed = 0;
+      }
+    }
+
+    // 4c. Post-tanda del programa (schedule)
+    if (scheduleEntry?.postAdBlock) {
+      await insertBlock(scheduleEntry.postAdBlock, 'POST_ROLL');
     }
 
     await fs.writeFile(concatPath, concatLines.join('\n') + '\n');
     this.log(
       session,
-      `concat.txt listo: ${downloadedMp4s.length} video(s)${totalAdsInjected > 0 ? ` + ${totalAdsInjected} spot(s) publicitario(s)` : ''}`,
+      `concat.txt: ${downloadedMp4s.length} video(s)${totalAdsInjected > 0 ? ` + ${totalAdsInjected} spot(s) publicitario(s)` : ' (sin publicidad)'}`,
     );
 
     // 4. Calidad de emisión: leer del canal y resolver preset
@@ -559,6 +608,19 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
       if (session.stopping) return;
 
+      // ── Reinicio limpio por cambio de programa (no cuenta como fallo) ──────────
+      if (session.scheduleChangePending) {
+        session.scheduleChangePending = false;
+        this.log(session, 'Reiniciando con nueva programación...');
+        this.stopRtmpOutputs(session, false);
+        setTimeout(() => {
+          if (!session.stopping && this.sessions.has(session.channelId)) {
+            this.launchFfmpeg(session);
+          }
+        }, 1000);
+        return;
+      }
+
       const isCleanExit  = code === 0;
       const isRapidExit  = uptime < 5000;
 
@@ -618,6 +680,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         }).catch(() => {});
       }
     });
+
+    // Arrancar el watcher de schedule para detectar cambios de programa
+    this.startScheduleWatcher(session);
   }
 
   // ─── Polling m3u8 ──────────────────────────────────────────────
@@ -971,6 +1036,70 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     session.recentLogs.push(line);
     if (session.recentLogs.length > MAX_LOGS) session.recentLogs.shift();
     this.logger.log(`[${session.channelId}] ${msg}`);
+  }
+
+  // ─── Schedule watcher ──────────────────────────────────────────
+
+  /**
+   * Inicia un timer que cada 30 s comprueba si el schedule activo cambió.
+   * Si detecta un cambio, marca scheduleChangePending y mata FFmpeg:
+   * el handler 'close' reconstruirá el concat con el nuevo programa y sus tandas.
+   */
+  private startScheduleWatcher(session: PlayoutSession): void {
+    // Cancelar el timer anterior si existe (evita duplicados en reinicios)
+    if (session.scheduleWatchTimer) {
+      clearTimeout(session.scheduleWatchTimer);
+      session.scheduleWatchTimer = null;
+    }
+
+    const CHECK_MS = 30_000;
+
+    const check = async () => {
+      if (session.stopping || !this.sessions.has(session.channelId)) return;
+      try {
+        const entry = await this.getActiveScheduleEntry(session.channelId);
+        const newId = entry?.id ?? null;
+        if (newId !== session.activeScheduleId) {
+          this.log(
+            session,
+            `Cambio de programa detectado (${session.activeScheduleId ?? 'default'} → ${newId ?? 'default'}) → reconstruyendo emisión`,
+          );
+          session.scheduleChangePending = true;
+          this.killSession(session);
+          return; // El handler 'close' relanzará y llamará a startScheduleWatcher de nuevo
+        }
+      } catch (err: any) {
+        this.log(session, `WARN schedule watcher: ${err.message}`);
+      }
+      // Reprogramar solo si no hubo cambio
+      if (!session.stopping && this.sessions.has(session.channelId)) {
+        session.scheduleWatchTimer = setTimeout(check, CHECK_MS);
+      }
+    };
+
+    session.scheduleWatchTimer = setTimeout(check, CHECK_MS);
+  }
+
+  /** Devuelve el schedule activo con sus tandas incluidas (para playout). */
+  private getActiveScheduleEntry(channelId: string) {
+    const now = new Date();
+    const spotSelect = {
+      where:   { isActive: true },
+      include: { video: { select: { id: true, originalKey: true, processedKey: true, duration: true, status: true } } },
+      orderBy: { order: 'asc' as const },
+    };
+    return this.prisma.schedule.findFirst({
+      where: { channelId, playlistId: { not: null }, startTime: { lte: now }, endTime: { gte: now } },
+      orderBy: { priority: 'desc' },
+      include: {
+        preAdBlock: {
+          include: { spots: spotSelect },
+        },
+        postAdBlock: {
+          include: { spots: spotSelect },
+        },
+      },
+    });
   }
 
   // ─── Playlist activa ───────────────────────────────────────────

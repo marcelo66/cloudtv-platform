@@ -24,6 +24,13 @@ export class SchedulesService {
     return schedule;
   }
 
+  /** Include para todas las queries de Schedule */
+  private readonly scheduleInclude = {
+    playlist:    { select: { id: true, name: true } },
+    preAdBlock:  { select: { id: true, name: true } },
+    postAdBlock: { select: { id: true, name: true } },
+  } as const;
+
   async create(dto: CreateScheduleDto, userId: string) {
     await this.verifyChannelOwnership(dto.channelId, userId);
 
@@ -33,15 +40,17 @@ export class SchedulesService {
 
     return this.prisma.schedule.create({
       data: {
-        channelId: dto.channelId,
-        playlistId: dto.playlistId,
-        name: dto.name,
-        startTime: start,
-        endTime: end,
-        recurrence: dto.recurrence ?? 'ONCE',
-        priority: dto.priority ?? 0,
+        channelId:    dto.channelId,
+        playlistId:   dto.playlistId,
+        name:         dto.name,
+        startTime:    start,
+        endTime:      end,
+        recurrence:   dto.recurrence ?? 'ONCE',
+        priority:     dto.priority ?? 0,
+        preAdBlockId:  dto.preAdBlockId,
+        postAdBlockId: dto.postAdBlockId,
       },
-      include: { playlist: { select: { id: true, name: true } } },
+      include: this.scheduleInclude,
     });
   }
 
@@ -52,12 +61,12 @@ export class SchedulesService {
     if (from || to) {
       where.startTime = {};
       if (from) where.startTime.gte = new Date(from);
-      if (to) where.startTime.lte = new Date(to);
+      if (to)   where.startTime.lte = new Date(to);
     }
 
     return this.prisma.schedule.findMany({
       where,
-      include: { playlist: { select: { id: true, name: true } } },
+      include: this.scheduleInclude,
       orderBy: { startTime: 'asc' },
     });
   }
@@ -66,7 +75,7 @@ export class SchedulesService {
     await this.verifyScheduleOwnership(id, userId);
     return this.prisma.schedule.findUnique({
       where: { id },
-      include: { playlist: { select: { id: true, name: true } } },
+      include: this.scheduleInclude,
     });
   }
 
@@ -75,12 +84,12 @@ export class SchedulesService {
 
     const data: any = { ...dto };
     if (dto.startTime) data.startTime = new Date(dto.startTime);
-    if (dto.endTime) data.endTime = new Date(dto.endTime);
+    if (dto.endTime)   data.endTime   = new Date(dto.endTime);
 
     return this.prisma.schedule.update({
       where: { id },
       data,
-      include: { playlist: { select: { id: true, name: true } } },
+      include: this.scheduleInclude,
     });
   }
 

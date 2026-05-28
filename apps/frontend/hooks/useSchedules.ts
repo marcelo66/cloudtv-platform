@@ -12,6 +12,10 @@ export interface Schedule {
   endTime: string;
   recurrence: 'ONCE' | 'DAILY' | 'WEEKLY' | 'WEEKDAYS' | 'WEEKENDS';
   priority: number;
+  preAdBlockId?: string | null;
+  postAdBlockId?: string | null;
+  preAdBlock?: { id: string; name: string } | null;
+  postAdBlock?: { id: string; name: string } | null;
   createdAt: string;
 }
 
@@ -39,6 +43,8 @@ export function useCreateSchedule() {
       endTime: string;
       recurrence?: string;
       priority?: number;
+      preAdBlockId?: string;
+      postAdBlockId?: string;
     }) => apiClient.post('/schedules', dto),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['schedules'] });
@@ -66,7 +72,7 @@ export function useDeleteSchedule() {
 export function useUpdateSchedule() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, data }: { id: string; data: Partial<Schedule> }) =>
+    mutationFn: ({ id, data }: { id: string; data: Partial<Schedule> & { preAdBlockId?: string | null; postAdBlockId?: string | null } }) =>
       apiClient.patch(`/schedules/${id}`, data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['schedules'] });

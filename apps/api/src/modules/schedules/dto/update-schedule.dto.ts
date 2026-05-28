@@ -27,4 +27,12 @@ export class UpdateScheduleDto {
   @Min(0)
   @IsOptional()
   priority?: number;
+
+  @IsString()
+  @IsOptional()
+  preAdBlockId?: string | null;
+
+  @IsString()
+  @IsOptional()
+  postAdBlockId?: string | null;
 }

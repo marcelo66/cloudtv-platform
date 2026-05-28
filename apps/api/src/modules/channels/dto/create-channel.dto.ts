@@ -6,6 +6,9 @@ import {
   IsOptional,
   Matches,
   IsIn,
+  IsInt,
+  Min,
+  Max,
 } from 'class-validator';
 
 export class CreateChannelDto {
@@ -49,4 +52,16 @@ export class UpdateChannelDto {
   @IsString()
   @IsIn(['480p', '720p', '1080p'])
   videoQuality?: string;
+
+  @ApiPropertyOptional({ description: 'Intervalo en minutos para insertar tanda automática (null = desactivado)' })
+  @IsOptional()
+  @IsInt()
+  @Min(5)
+  @Max(120)
+  adIntervalMinutes?: number | null;
+
+  @ApiPropertyOptional({ description: 'ID de la tanda a insertar en cada intervalo' })
+  @IsOptional()
+  @IsString()
+  adIntervalBlockId?: string | null;
 }
