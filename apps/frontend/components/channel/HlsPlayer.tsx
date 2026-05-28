@@ -21,12 +21,14 @@ export function HlsPlayer({ src, active = true, starting = false }: Props) {
     if (starting && !active) {
       setState('starting');
       hlsRef.current?.destroy();
+      hlsRef.current = null;
       return;
     }
 
     if (!active) {
       setState('offline');
       hlsRef.current?.destroy();
+      hlsRef.current = null;
       return;
     }
 
@@ -38,11 +40,15 @@ export function HlsPlayer({ src, active = true, starting = false }: Props) {
 
     let destroyed = false;
 
+    // Handlers para limpiar en cleanup
+    let onPlaying: (() => void) | null = null;
+
     const init = async () => {
-      // Safari nativo soporta HLS
+      // Safari nativo soporta HLS directamente
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = src;
-        video.addEventListener('playing', () => !destroyed && setState('playing'), { once: true });
+        onPlaying = () => { if (!destroyed) setState('playing'); };
+        video.addEventListener('playing', onPlaying, { once: true });
         video.addEventListener('error', () => {
           if (!destroyed) {
             setState('error');
@@ -67,28 +73,34 @@ export function HlsPlayer({ src, active = true, starting = false }: Props) {
         backBufferLength: 30,
         maxBufferLength: 30,
         maxMaxBufferLength: 60,
-        // Reintentar la carga cada 3 segundos si hay error
+        // Reintentar la carga del manifest si no está listo aún
         manifestLoadingRetryDelay: 3000,
         manifestLoadingMaxRetry: 20,
+        // Reintentar fragmentos: evita error fatal por un segmento eliminado
+        fragLoadingMaxRetry: 6,
+        fragLoadingRetryDelay: 1500,
       });
       hlsRef.current = hls;
 
       hls.loadSource(src);
       hls.attachMedia(video);
 
+      // Cuando el manifest está parseado, intentar play()
       hls.on(HlsLib.Events.MANIFEST_PARSED, () => {
-        if (!destroyed) {
+        if (!destroyed) video.play().catch(() => {});
+      });
+
+      // Cuando el primer fragmento está en el buffer, volver a intentar
+      // play() por si el primer intento fue rechazado (video hidden, etc.)
+      hls.on(HlsLib.Events.FRAG_BUFFERED, () => {
+        if (!destroyed && video.paused) {
           video.play().catch(() => {});
         }
       });
 
-      hls.on(HlsLib.Events.MEDIA_ATTACHED, () => {
-        if (!destroyed) setState('loading');
-      });
-
-      video.addEventListener('playing', () => {
-        if (!destroyed) setState('playing');
-      }, { once: true });
+      // Listener principal para transición a 'playing'
+      onPlaying = () => { if (!destroyed) setState('playing'); };
+      video.addEventListener('playing', onPlaying, { once: true });
 
       hls.on(HlsLib.Events.ERROR, (_: any, data: any) => {
         if (destroyed) return;
@@ -98,6 +110,7 @@ export function HlsPlayer({ src, active = true, starting = false }: Props) {
             ? 'Error de red: verificá que el canal esté transmitiendo'
             : `Error de stream (${data.type})`);
           hls.destroy();
+          hlsRef.current = null;
         }
       });
     };
@@ -111,6 +124,10 @@ export function HlsPlayer({ src, active = true, starting = false }: Props) {
 
     return () => {
       destroyed = true;
+      // Limpiar el listener de 'playing' si no se disparó
+      if (onPlaying && video) {
+        video.removeEventListener('playing', onPlaying);
+      }
       hlsRef.current?.destroy();
       hlsRef.current = null;
     };
@@ -118,18 +135,27 @@ export function HlsPlayer({ src, active = true, starting = false }: Props) {
 
   return (
     <div className="relative w-full h-full bg-black">
-      {/* Video element — siempre en el DOM para que hls.js lo use */}
+      {/*
+        El <video> SIEMPRE está en el DOM y en layout (nunca display:none).
+        Con display:none Chrome puede rechazar video.play() o no disparar
+        el evento 'playing' incluso en videos muted.
+        Usamos visibility+opacity para ocultarlo visualmente cuando no está
+        reproduciendo, mientras los overlays de estado aparecen encima.
+      */}
       <video
         ref={videoRef}
         className="w-full h-full object-contain"
+        style={{
+          visibility: state === 'playing' ? 'visible' : 'hidden',
+          opacity:    state === 'playing' ? 1 : 0,
+        }}
         controls={state === 'playing'}
         autoPlay
         muted
         playsInline
-        style={{ display: state === 'playing' ? 'block' : 'none' }}
       />
 
-      {/* Overlay states */}
+      {/* Overlay states — absolutas sobre el video */}
       {state === 'offline' && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
           <div className="w-14 h-14 rounded-2xl bg-surface-600 flex items-center justify-center">
