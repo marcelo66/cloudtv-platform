@@ -94,9 +94,9 @@ export class VideoProcessor extends WorkerHost {
       // ─── 6. Transcodificar si es necesario ───────────────────
       let finalKey = originalKey;
 
-      if (this.ffmpeg.needsTranscode(metadata.codec, metadata.audioCodec)) {
+      if (this.ffmpeg.needsTranscode(metadata.codec, metadata.audioCodec, metadata.audioChannels)) {
         this.logger.log(
-          `Transcoding required: codec=${metadata.codec} audio=${metadata.audioCodec}`,
+          `Transcoding required: codec=${metadata.codec} audio=${metadata.audioCodec} channels=${metadata.audioChannels}`,
         );
         const outputPath = path.join(tmpDir, 'processed.mp4');
         await this.ffmpeg.transcodeToH264(inputPath, outputPath);
@@ -115,7 +115,7 @@ export class VideoProcessor extends WorkerHost {
         this.logger.log(`Transcoded video uploaded: ${processedKey}`);
       } else {
         this.logger.log(
-          `No transcode needed (${metadata.codec}/${metadata.audioCodec}) — using original`,
+          `No transcode needed (${metadata.codec}/${metadata.audioCodec} ${metadata.audioChannels}ch) — using original`,
         );
         await this.prisma.video.update({
           where: { id: videoId },

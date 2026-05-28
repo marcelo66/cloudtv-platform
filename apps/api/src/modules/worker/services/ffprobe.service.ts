@@ -8,6 +8,7 @@ export interface VideoMetadata {
   fps: number;
   codec: string;           // 'h264', 'hevc', etc.
   audioCodec: string;      // 'aac', 'mp3', etc.
+  audioChannels: number;   // 1=mono, 2=stereo, 6=5.1, etc.
   bitrate: number;         // kbps
   hasAudio: boolean;
 }
@@ -91,6 +92,7 @@ export class FfprobeService {
       fps: Math.round(fps * 100) / 100,
       codec: videoStream.codec_name ?? 'unknown',
       audioCodec: audioStream?.codec_name ?? 'none',
+      audioChannels: audioStream?.channels ?? 0,
       bitrate,
       hasAudio: !!audioStream,
     };

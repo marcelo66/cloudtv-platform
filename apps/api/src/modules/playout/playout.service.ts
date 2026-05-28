@@ -300,6 +300,27 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     // Filtro de normalización para cuando no hay overlays (scale + fps + formato)
     const normalizeVf = `scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,fps=25,format=yuv420p`;
 
+    // Filtro de audio: convierte cualquier layout (mono, 5.1, 7.1, etc.) a estéreo
+    // y resamplea async para compensar gaps causados por paquetes corruptos descartados.
+    // Esto soluciona "channel element 1.6 is not allocated" en videos con audio 5.1.
+    const audioFilter = 'aformat=channel_layouts=stereo,aresample=async=1';
+
+    // Para el camino con overlays: el audio se incluye dentro del mismo filter_complex
+    // (video overlay chain + audio downmix chain en paralelo, separados por ';')
+    const finalFilterComplex = overlayFilter
+      ? `${overlayFilter.filterComplex};[0:a]${audioFilter}[aout]`
+      : null;
+
+    // Flags de tolerancia en el input: descarta paquetes corruptos (H264 AVCC start-code
+    // errors, AAC 5.1 frames inválidos) en lugar de propagar errores al encoder.
+    // -fflags +discardcorrupt : silencia "No start code is found" / "NAL unit" errors
+    // -fflags +genpts        : regenera PTS faltantes o corruptos
+    // -err_detect ignore_err : ignora errores no fatales en el decoder
+    const inputFlags = [
+      '-fflags', '+genpts+discardcorrupt',
+      '-err_detect', 'ignore_err',
+    ];
+
     // -re: leer a velocidad real (1×) → imprescindible para live HLS
     // Sin -re FFmpeg encodes 50× más rápido, los segmentos se generan en segundos,
     // el playlist borra los viejos antes de que el player pueda cargarlos → 404 fatal.
@@ -309,11 +330,12 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           '-loglevel', 'warning',
           '-re',
           '-stream_loop', '-1',
+          ...inputFlags,
           '-f', 'concat', '-safe', '0', '-i', concatPath,
           ...overlayFilter.extraInputArgs,
-          '-filter_complex', overlayFilter.filterComplex,
+          '-filter_complex', finalFilterComplex!,
           '-map', overlayFilter.videoMapLabel,
-          '-map', '0:a?',
+          '-map', '[aout]',
           ...codecArgs,
           ...hlsArgs,
         ]
@@ -321,16 +343,18 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           '-loglevel', 'warning',
           '-re',
           '-stream_loop', '-1',
+          ...inputFlags,
           '-f', 'concat', '-safe', '0', '-i', concatPath,
           '-vf', normalizeVf,
+          '-af', audioFilter,
           ...codecArgs,
           ...hlsArgs,
         ];
 
     this.log(session, `Lanzando FFmpeg HLS${overlayFilter ? ' + overlays' : ''}...`);
-    if (overlayFilter) {
-      // Log diagnóstico: mostrar el filter_complex completo para detectar errores de sintaxis
-      const fc = overlayFilter.filterComplex;
+    if (finalFilterComplex) {
+      // Log diagnóstico: mostrar el filter_complex completo (video + audio) para detectar errores de sintaxis
+      const fc = finalFilterComplex;
       this.log(session, `[DIAG] filter_complex (${fc.length}ch): ${fc.length > 700 ? fc.substring(0, 700) + '...' : fc}`);
     }
 

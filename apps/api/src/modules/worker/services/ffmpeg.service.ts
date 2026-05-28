@@ -88,14 +88,18 @@ export class FfmpegService {
   }
 
   // ─── Verificar si el video necesita transcodificación ────────
+  // Fuerza transcode si:
+  //   · codec de video no es H264
+  //   · codec de audio no es AAC
+  //   · audio tiene más de 2 canales (ej: 5.1) — AAC 5.1 rompe el playout
 
-  needsTranscode(codec: string, audioCodec: string): boolean {
+  needsTranscode(codec: string, audioCodec: string, audioChannels = 2): boolean {
     const BROADCAST_COMPATIBLE_VIDEO = ['h264', 'avc1'];
     const BROADCAST_COMPATIBLE_AUDIO = ['aac', 'mp4a'];
-    return (
-      !BROADCAST_COMPATIBLE_VIDEO.includes(codec.toLowerCase()) ||
-      !BROADCAST_COMPATIBLE_AUDIO.includes(audioCodec.toLowerCase())
-    );
+    const isVideoOk = BROADCAST_COMPATIBLE_VIDEO.includes(codec.toLowerCase());
+    const isAudioOk = BROADCAST_COMPATIBLE_AUDIO.includes(audioCodec.toLowerCase());
+    const isStereoOrMono = audioChannels <= 2;
+    return !isVideoOk || !isAudioOk || !isStereoOrMono;
   }
 
   // ─── Helper: correr proceso y loguear stderr ──────────────────
