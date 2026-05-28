@@ -13,6 +13,9 @@ import { SchedulesModule } from './modules/schedules/schedules.module';
 import { PlayoutModule } from './modules/playout/playout.module';
 import { OverlaysModule } from './modules/overlays/overlays.module';
 import { StreamOutputsModule } from './modules/stream-outputs/stream-outputs.module';
+import { AdBlocksModule } from './modules/ad-blocks/ad-blocks.module';
+import { CuePointsModule } from './modules/cue-points/cue-points.module';
+import { AdReportsModule } from './modules/ad-reports/ad-reports.module';
 
 @Module({
   imports: [
@@ -52,6 +55,9 @@ import { StreamOutputsModule } from './modules/stream-outputs/stream-outputs.mod
     PlayoutModule,
     OverlaysModule,
     StreamOutputsModule,
+    AdBlocksModule,
+    CuePointsModule,
+    AdReportsModule,
     WorkerModule,
   ],
 })

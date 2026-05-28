@@ -15,6 +15,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { OverlaysService } from '../overlays/overlays.service';
 import { StreamOutputsService } from '../stream-outputs/stream-outputs.service';
+import { AdBlocksService, CuePointForPlayout, AdSpotWithVideo } from '../ad-blocks/ad-blocks.service';
 
 interface PlayoutSession {
   channelId: string;
@@ -68,6 +69,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     private config: ConfigService,
     private overlaysService: OverlaysService,
     private streamOutputsService: StreamOutputsService,
+    private adBlocksService: AdBlocksService,
   ) {}
 
   // ─── Lifecycle ────────────────────────────────────────────────
@@ -263,11 +265,138 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     }
     if (session.stopping) return;
 
-    // 3. concat.txt apuntando a los MP4s originales (no hay pre-normalización)
-    // El encode se hace en un único paso FFmpeg → segmentos HLS listos en segundos
+    // 3. Tandas publicitarias: obtener cue points activos y descargar spots
+    const cuePoints = await this.adBlocksService.getCuePointsForPlayout(session.channelId).catch(() => []);
+    const adDownloads = new Map<string, string>(); // videoId → localPath
+
+    if (cuePoints.length > 0) {
+      this.log(session, `Publicidad: ${cuePoints.length} cue point(s) activo(s)`);
+      const adsDir = path.join(session.hlsDir, 'ads');
+      await fs.mkdir(adsDir, { recursive: true });
+
+      // Recopilar spots únicos de todos los cue points
+      const allSpots = new Map<string, AdSpotWithVideo>();
+      for (const cp of cuePoints) {
+        for (const spot of cp.adBlock.spots) {
+          if (!allSpots.has(spot.videoId)) allSpots.set(spot.videoId, spot);
+        }
+      }
+
+      // Descargar spots (reutiliza caché si existen)
+      for (const [videoId, spot] of allSpots) {
+        if (session.stopping) return;
+        const key = spot.video.processedKey ?? spot.video.originalKey;
+        if (!key) continue;
+        const adPath = path.join(adsDir, `spot_${videoId}.mp4`);
+        let cached = false;
+        try { await fs.access(adPath); cached = true; } catch {}
+        if (cached) {
+          adDownloads.set(videoId, adPath);
+        } else {
+          try {
+            await this.storage.downloadToFile(key, adPath);
+            adDownloads.set(videoId, adPath);
+            this.log(session, `  ✓ Spot "${spot.name}" (${spot.advertiser}) descargado`);
+          } catch (err: any) {
+            this.log(session, `  WARN: Spot "${spot.name}" no disponible: ${err.message}`);
+          }
+        }
+      }
+    }
+    if (session.stopping) return;
+
+    // 4. Construir concat.txt con inyección de publicidad
     const concatPath = path.join(session.hlsDir, 'concat.txt');
-    await fs.writeFile(concatPath, downloadedMp4s.map(f => `file '${f}'`).join('\n') + '\n');
-    this.log(session, `concat.txt listo con ${downloadedMp4s.length} video(s)`);
+    const concatLines: string[] = [];
+    let totalAdsInjected = 0;
+
+    for (let i = 0; i < playlist.items.length; i++) {
+      const item = playlist.items[i];
+      const mp4Path = downloadedMp4s[i];
+      const videoId = item.video.id;
+
+      // Obtener cue points activos para este video
+      const videoCues = cuePoints.filter((cp) => cp.videoId === videoId);
+      const preRolls  = videoCues.filter((cp) => cp.type === 'PRE_ROLL');
+      const postRolls = videoCues.filter((cp) => cp.type === 'POST_ROLL');
+      const midRolls  = videoCues
+        .filter((cp) => cp.type === 'MID_ROLL' && cp.timeOffset != null)
+        .sort((a, b) => (a.timeOffset ?? 0) - (b.timeOffset ?? 0));
+
+      // PRE_ROLL: spots antes del video
+      for (const cp of preRolls) {
+        const spots = await this.adBlocksService.getRotatedSpots(cp.adBlock as any);
+        for (const spot of spots) {
+          const adPath = adDownloads.get(spot.videoId);
+          if (!adPath) continue;
+          concatLines.push(`file '${adPath}'`);
+          totalAdsInjected++;
+          // Registrar impresión (fire-and-forget)
+          this.adBlocksService.recordImpression(
+            spot.id, cp.adBlock.id, session.channelId,
+            spot.advertiser, 'PRE_ROLL', spot.video.duration,
+          ).catch(() => {});
+        }
+      }
+
+      // Video principal con posibles MID_ROLLs
+      if (midRolls.length === 0) {
+        // Sin mid-roll: entrada simple
+        concatLines.push(`file '${mp4Path}'`);
+        if (item.trimStart) concatLines.push(`inpoint ${item.trimStart}`);
+        if (item.trimEnd)   concatLines.push(`outpoint ${item.trimEnd}`);
+      } else {
+        // Con mid-roll: partir el video en segmentos e insertar tandas
+        let inpoint: number = item.trimStart ?? 0;
+        for (const cp of midRolls) {
+          const outpoint = cp.timeOffset!;
+          // Segmento hasta el mid-roll
+          concatLines.push(`file '${mp4Path}'`);
+          if (inpoint > 0)  concatLines.push(`inpoint ${inpoint}`);
+          concatLines.push(`outpoint ${outpoint}`);
+          // Spots del mid-roll
+          const spots = await this.adBlocksService.getRotatedSpots(cp.adBlock as any);
+          for (const spot of spots) {
+            const adPath = adDownloads.get(spot.videoId);
+            if (!adPath) continue;
+            concatLines.push(`file '${adPath}'`);
+            totalAdsInjected++;
+            this.adBlocksService.recordImpression(
+              spot.id, cp.adBlock.id, session.channelId,
+              spot.advertiser, 'MID_ROLL', spot.video.duration,
+            ).catch(() => {});
+          }
+          inpoint = outpoint;
+        }
+        // Segmento final tras el último mid-roll
+        concatLines.push(`file '${mp4Path}'`);
+        if (inpoint > 0) concatLines.push(`inpoint ${inpoint}`);
+        if (item.trimEnd) concatLines.push(`outpoint ${item.trimEnd}`);
+      }
+
+      // POST_ROLL: spots después del video
+      for (const cp of postRolls) {
+        const spots = await this.adBlocksService.getRotatedSpots(cp.adBlock as any);
+        for (const spot of spots) {
+          const adPath = adDownloads.get(spot.videoId);
+          if (!adPath) continue;
+          concatLines.push(`file '${adPath}'`);
+          totalAdsInjected++;
+          this.adBlocksService.recordImpression(
+            spot.id, cp.adBlock.id, session.channelId,
+            spot.advertiser, 'POST_ROLL', spot.video.duration,
+          ).catch(() => {});
+        }
+      }
+
+      // Si no hubo ningún cue point para este video ni trim, entrada simple ya hecha arriba
+    }
+
+    await fs.writeFile(concatPath, concatLines.join('\n') + '\n');
+    this.log(
+      session,
+      `concat.txt listo: ${downloadedMp4s.length} video(s)${totalAdsInjected > 0 ? ` + ${totalAdsInjected} spot(s) publicitario(s)` : ''}`,
+    );
 
     // 4. Calidad de emisión: leer del canal y resolver preset
     const channelData = await this.prisma.channel.findUnique({

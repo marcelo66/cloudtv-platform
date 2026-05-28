@@ -57,12 +57,15 @@ model Channel {
   createdAt    DateTime      @default(now()) @map("created_at")
   updatedAt    DateTime      @updatedAt @map("updated_at")
 
-  videos     Video[]
-  playlists  Playlist[]
-  overlays   Overlay[]
-  schedules  Schedule[]
-  outputs    StreamOutput[]
-  logs       PlayoutLog[]
+  videos        Video[]
+  playlists     Playlist[]
+  overlays      Overlay[]
+  schedules     Schedule[]
+  outputs       StreamOutput[]
+  logs          PlayoutLog[]
+  adBlocks      AdBlock[]
+  cuePoints     CuePoint[]
+  adImpressions AdImpression[]
 
   @@map("channels")
 }
@@ -92,6 +95,8 @@ model Video {
   updatedAt     DateTime    @updatedAt @map("updated_at")
 
   playlistItems PlaylistItem[]
+  adSpots       AdSpot[]
+  cuePoints     CuePoint[]
 
   @@map("videos")
 }
@@ -184,6 +189,80 @@ model StreamOutput {
   @@map("stream_outputs")
 }
 
+// ─── AD BREAKS (Tandas Publicitarias) ────────────────────────
+
+model AdBlock {
+  id            String       @id @default(cuid())
+  channelId     String       @map("channel_id")
+  channel       Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  name          String
+  description   String?
+  rotationMode  RotationMode @default(SEQUENTIAL) @map("rotation_mode")
+  sequenceIndex Int          @default(0) @map("sequence_index")
+  isActive      Boolean      @default(true) @map("is_active")
+  createdAt     DateTime     @default(now()) @map("created_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+
+  spots       AdSpot[]
+  cuePoints   CuePoint[]
+  impressions AdImpression[]
+
+  @@map("ad_blocks")
+}
+
+model AdSpot {
+  id         String   @id @default(cuid())
+  adBlockId  String   @map("ad_block_id")
+  adBlock    AdBlock  @relation(fields: [adBlockId], references: [id], onDelete: Cascade)
+  videoId    String   @map("video_id")
+  video      Video    @relation(fields: [videoId], references: [id])
+  name       String
+  advertiser String
+  weight     Int      @default(1)
+  order      Int      @default(0)
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  impressions AdImpression[]
+
+  @@map("ad_spots")
+}
+
+model CuePoint {
+  id         String       @id @default(cuid())
+  channelId  String       @map("channel_id")
+  channel    Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  videoId    String       @map("video_id")
+  video      Video        @relation(fields: [videoId], references: [id])
+  adBlockId  String       @map("ad_block_id")
+  adBlock    AdBlock      @relation(fields: [adBlockId], references: [id], onDelete: Cascade)
+  type       CuePointType
+  timeOffset Float?       @map("time_offset")
+  isActive   Boolean      @default(true) @map("is_active")
+  label      String?      // Etiqueta descriptiva opcional
+  createdAt  DateTime     @default(now()) @map("created_at")
+  updatedAt  DateTime     @updatedAt @map("updated_at")
+
+  @@map("cue_points")
+}
+
+model AdImpression {
+  id          String       @id @default(cuid())
+  adSpotId    String       @map("ad_spot_id")
+  adSpot      AdSpot       @relation(fields: [adSpotId], references: [id], onDelete: Cascade)
+  adBlockId   String       @map("ad_block_id")
+  adBlock     AdBlock      @relation(fields: [adBlockId], references: [id], onDelete: Cascade)
+  channelId   String       @map("channel_id")
+  channel     Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  advertiser  String
+  type        CuePointType
+  duration    Float?
+  scheduledAt DateTime     @default(now()) @map("scheduled_at")
+
+  @@map("ad_impressions")
+}
+
 // ─── PLAYOUT LOGS ─────────────────────────────────────────────
 
 model PlayoutLog {
@@ -261,4 +340,16 @@ enum OutputStatus {
   IDLE
   STREAMING
   ERROR
+}
+
+enum RotationMode {
+  SEQUENTIAL
+  RANDOM
+  WEIGHTED
+}
+
+enum CuePointType {
+  PRE_ROLL
+  MID_ROLL
+  POST_ROLL
 }
