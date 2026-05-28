@@ -328,6 +328,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         ];
 
     this.log(session, `Lanzando FFmpeg HLS${overlayFilter ? ' + overlays' : ''}...`);
+    if (overlayFilter) {
+      // Log diagnóstico: mostrar el filter_complex completo para detectar errores de sintaxis
+      const fc = overlayFilter.filterComplex;
+      this.log(session, `[DIAG] filter_complex (${fc.length}ch): ${fc.length > 700 ? fc.substring(0, 700) + '...' : fc}`);
+    }
 
     let spawnedAt = Date.now(); // se ajusta en el evento 'spawn'
     const hadOverlays = !!overlayFilter;
@@ -369,7 +374,8 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       // ── Caso 1: falla rápida con overlays activos → overlay fallback ───────
       if (isRapidExit && !isCleanExit && hadOverlays && !session.overlaysDisabled) {
         session.overlaysDisabled = true;
-        this.log(session, 'WARN: Salida rápida con overlays → reintentando sin overlays (posible problema de fuentes/filter_complex)');
+        this.log(session, `ERROR: FFmpeg con overlays falló en ${uptime}ms (code=${code}) → ver [DIAG] filter_complex y errores "ffmpeg:" arriba`);
+        this.log(session, 'WARN: Overlay fallback activado → reintentando sin overlays');
         this.stopRtmpOutputs(session, false);
         setTimeout(() => this.launchFfmpeg(session), 2000);
         return;
@@ -588,10 +594,12 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           const localPath = path.join(session.hlsDir, `logo_${ov.id}.png`);
           try {
             await this.storage.downloadToFile(cfg.imageKey, localPath);
+            const { size } = await fs.stat(localPath);
+            if (size < 8) throw new Error(`archivo inválido (${size}B — PNG mínimo 8B)`);
             logoLocalPaths.set(ov.id, localPath);
-            this.log(session, `  ✓ Logo "${ov.name}" descargado`);
+            this.log(session, `  ✓ Logo "${ov.name}" descargado (${Math.round(size / 1024)}KB)`);
           } catch (err: any) {
-            this.log(session, `  WARN: Logo "${ov.name}" falló descarga: ${err.message}`);
+            this.log(session, `  WARN: Logo "${ov.name}" no disponible: ${err.message}`);
           }
         }
       }
@@ -619,9 +627,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         if (cfg.width) {
           const sl = `sc${idx}`;
           filterParts.push(`[${inputIdx}:v]scale=${cfg.width}:-1[${sl}]`);
-          filterParts.push(`[${currentStream}][${sl}]overlay=${pos}[${nextStream}]`);
+          filterParts.push(`[${currentStream}][${sl}]overlay=${pos}:eof_action=repeat[${nextStream}]`);
         } else {
-          filterParts.push(`[${currentStream}][${inputIdx}:v]overlay=${pos}[${nextStream}]`);
+          filterParts.push(`[${currentStream}][${inputIdx}:v]overlay=${pos}:eof_action=repeat[${nextStream}]`);
         }
 
       } else if (ov.type === OverlayType.TEXT_STATIC) {
@@ -667,7 +675,8 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
     return {
       filterComplex:  filterParts.join(';'),
-      extraInputArgs: extraInputPaths.flatMap(p => ['-i', p]),
+      // -loop 1: el PNG se repite indefinidamente (sin esto provee 1 solo frame y luego EOF)
+      extraInputArgs: extraInputPaths.flatMap(p => ['-loop', '1', '-i', p]),
       videoMapLabel:  `[${currentStream}]`,
     };
   }

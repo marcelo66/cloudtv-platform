@@ -15,7 +15,6 @@ import {
   ToggleRight,
   Upload,
   X,
-  AlertCircle,
 } from 'lucide-react';
 import { Header } from '@/components/dashboard/Header';
 import apiClient from '@/lib/api-client';
@@ -215,6 +214,9 @@ function OverlayFormModal({
   const [config, setConfig]     = useState<Record<string, any>>(
     overlay?.config ?? DEFAULT_CONFIG['TEXT_STATIC'],
   );
+  // Logo pendiente (solo en modo creación — se sube al guardar)
+  const [pendingLogo, setPendingLogo]         = useState<File | null>(null);
+  const [pendingLogoPreview, setPendingLogoPreview] = useState<string | null>(null);
 
   // Cuando cambia el tipo (solo en creación) resetear config
   const handleTypeChange = (t: OverlayType) => {
@@ -230,7 +232,7 @@ function OverlayFormModal({
   const uploadLogo = useUploadOverlayLogo();
   const logoRef    = useRef<HTMLInputElement>(null);
 
-  const isLoading = createMut.isPending || updateMut.isPending;
+  const isLoading = createMut.isPending || updateMut.isPending || uploadLogo.isPending;
 
   const handleSubmit = async () => {
     if (!name.trim()) { toast.error('El nombre es requerido'); return; }
@@ -241,20 +243,51 @@ function OverlayFormModal({
         { onSuccess: onClose },
       );
     } else {
+      // Crear overlay y — si hay logo pendiente — subirlo inmediatamente después
       createMut.mutate(
         {
           channelId,
           input: { name: name.trim(), type, enabled, config, zIndex } satisfies CreateOverlayInput,
         },
-        { onSuccess: onClose },
+        {
+          onSuccess: async (res: any) => {
+            if (pendingLogo && type === 'LOGO') {
+              try {
+                await uploadLogo.mutateAsync({ channelId, id: res.data.id, file: pendingLogo });
+              } catch {
+                // El upload falló — el overlay ya fue creado, el logo se puede subir luego
+                toast.error('Overlay creado, pero falló la subida del logo. Intentá de nuevo editando el overlay.');
+              }
+            }
+            onClose();
+          },
+        },
       );
     }
   };
 
-  const handleLogoFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleLogoFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !overlay) return;
-    uploadLogo.mutate({ channelId, id: overlay.id, file });
+    if (!file) return;
+
+    if (isEdit) {
+      // Modo edición: subir inmediatamente y sincronizar el estado local
+      uploadLogo.mutate(
+        { channelId, id: overlay!.id, file },
+        {
+          onSuccess: (res: any) => {
+            // Sincronizar config local con el config guardado (que ahora tiene imageKey/imageUrl)
+            // Esto evita que "Guardar cambios" sobreescriba el imageUrl con el config viejo
+            setConfig((prev: any) => ({ ...prev, ...res.data.config }));
+          },
+        },
+      );
+    } else {
+      // Modo creación: guardar local hasta que se cree el overlay
+      if (pendingLogoPreview) URL.revokeObjectURL(pendingLogoPreview);
+      setPendingLogo(file);
+      setPendingLogoPreview(URL.createObjectURL(file));
+    }
     e.target.value = '';
   };
 
@@ -359,36 +392,53 @@ function OverlayFormModal({
                 </div>
               </div>
 
-              {/* Logo upload (solo en edición) */}
-              {isEdit && (
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Imagen del logo</label>
-                  {config.imageUrl && (
-                    <img src={config.imageUrl} alt="logo" className="h-12 object-contain rounded mb-2 border border-surface-600" />
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => logoRef.current?.click()}
-                    disabled={uploadLogo.isPending}
-                    className="flex items-center gap-2 px-3 py-2 rounded-lg border border-dashed border-surface-500 text-xs text-slate-400 hover:border-brand-500 hover:text-brand-400 transition-colors disabled:opacity-50"
-                  >
-                    <Upload className="w-3.5 h-3.5" />
-                    {uploadLogo.isPending ? 'Subiendo...' : 'Subir PNG / JPG'}
-                  </button>
-                  <input ref={logoRef} type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={handleLogoFile} />
-                  {!isEdit && (
-                    <p className="text-xs text-slate-500 mt-1 flex items-center gap-1">
-                      <AlertCircle className="w-3 h-3" /> Primero guardá el overlay, luego subí la imagen.
-                    </p>
-                  )}
-                </div>
-              )}
-              {!isEdit && (
-                <p className="text-xs text-slate-500 flex items-center gap-1">
-                  <AlertCircle className="w-3 h-3" />
-                  Creá el overlay primero y luego volvé a editarlo para subir la imagen.
-                </p>
-              )}
+              {/* Logo upload — visible siempre (creación Y edición) */}
+              <div>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Imagen del logo</label>
+
+                {/* Preview: imagen guardada o previsualización local (antes de guardar) */}
+                {(pendingLogoPreview || config.imageUrl) && (
+                  <img
+                    src={pendingLogoPreview ?? config.imageUrl}
+                    alt="logo preview"
+                    className="h-14 object-contain rounded mb-2 border border-surface-600 bg-surface-900 p-1"
+                  />
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => logoRef.current?.click()}
+                  disabled={uploadLogo.isPending}
+                  className="flex items-center gap-2 px-3 py-2 rounded-lg border border-dashed border-surface-500 text-xs text-slate-400 hover:border-brand-500 hover:text-brand-400 transition-colors disabled:opacity-50"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  {uploadLogo.isPending
+                    ? 'Subiendo...'
+                    : pendingLogo
+                      ? `✓ ${pendingLogo.name}`
+                      : config.imageUrl
+                        ? 'Cambiar imagen'
+                        : 'Seleccionar PNG / JPG'}
+                </button>
+                <input
+                  ref={logoRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp"
+                  className="hidden"
+                  onChange={handleLogoFileSelect}
+                />
+
+                {!isEdit && pendingLogo && (
+                  <p className="text-xs text-green-400 mt-1 flex items-center gap-1">
+                    <Upload className="w-3 h-3" /> La imagen se subirá al crear el overlay.
+                  </p>
+                )}
+                {!isEdit && !pendingLogo && (
+                  <p className="text-xs text-slate-500 mt-1">
+                    Podés seleccionar la imagen ahora o después de crear el overlay.
+                  </p>
+                )}
+              </div>
             </div>
           )}
 
