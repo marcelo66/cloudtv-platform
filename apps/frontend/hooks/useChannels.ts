@@ -11,6 +11,7 @@ export interface Channel {
   status: 'OFFLINE' | 'LIVE_PLAYLIST' | 'LIVE_RTMP' | 'STARTING' | 'ERROR';
   streamKey: string;
   hlsUrl?: string;
+  videoQuality: '480p' | '720p' | '1080p';
   createdAt: string;
   updatedAt: string;
   _count?: { videos: number; playlists: number };
@@ -45,7 +46,7 @@ export function useChannel(id: string | null) {
 export function useUpdateChannel() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, data }: { id: string; data: { name?: string; description?: string } }) =>
+    mutationFn: ({ id, data }: { id: string; data: { name?: string; description?: string; videoQuality?: string } }) =>
       apiClient.patch(`/channels/${id}`, data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['channels'] });

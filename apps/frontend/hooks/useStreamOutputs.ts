@@ -138,3 +138,32 @@ export function useDeleteOutput() {
     onError: () => toast.error('Error al eliminar la salida'),
   });
 }
+
+/** Inicia una salida RTMP individual (sin depender del inicio automático del canal). */
+export function useStartOutput() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ channelId, id }: { channelId: string; id: string }) =>
+      apiClient.post(`/playout/${channelId}/outputs/${id}/start`),
+    onSuccess: (res: any, { channelId }) => {
+      qc.invalidateQueries({ queryKey: ['stream-outputs', channelId] });
+      if (res.data?.success) toast.success(res.data.message ?? 'Salida iniciada');
+      else toast.error(res.data?.message ?? 'No se pudo iniciar la salida');
+    },
+    onError: () => toast.error('Error al iniciar la salida'),
+  });
+}
+
+/** Detiene una salida RTMP individual sin afectar el canal ni otras salidas. */
+export function useStopOutput() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ channelId, id }: { channelId: string; id: string }) =>
+      apiClient.post(`/playout/${channelId}/outputs/${id}/stop`),
+    onSuccess: (_, { channelId }) => {
+      qc.invalidateQueries({ queryKey: ['stream-outputs', channelId] });
+      toast.success('Salida detenida');
+    },
+    onError: () => toast.error('Error al detener la salida'),
+  });
+}

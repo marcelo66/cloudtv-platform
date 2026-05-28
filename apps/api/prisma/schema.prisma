@@ -42,18 +42,20 @@ model RefreshToken {
 // ─── CHANNEL ─────────────────────────────────────────────────
 
 model Channel {
-  id          String        @id @default(cuid())
-  userId      String        @map("user_id")
-  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  name        String
-  slug        String        @unique
-  description String?
-  logoUrl     String?       @map("logo_url")
-  status      ChannelStatus @default(OFFLINE)
-  streamKey   String        @unique @map("stream_key") @default(cuid())
-  hlsUrl      String?       @map("hls_url")
-  createdAt   DateTime      @default(now()) @map("created_at")
-  updatedAt   DateTime      @updatedAt @map("updated_at")
+  id           String        @id @default(cuid())
+  userId       String        @map("user_id")
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name         String
+  slug         String        @unique
+  description  String?
+  logoUrl      String?       @map("logo_url")
+  status       ChannelStatus @default(OFFLINE)
+  streamKey    String        @unique @map("stream_key") @default(cuid())
+  hlsUrl       String?       @map("hls_url")
+  videoQuality String        @default("480p") @map("video_quality")
+  // Valores: 480p | 720p | 1080p
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
 
   videos     Video[]
   playlists  Playlist[]

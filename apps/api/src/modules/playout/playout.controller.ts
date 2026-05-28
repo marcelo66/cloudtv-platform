@@ -1,6 +1,7 @@
 import {
   Controller,
   Get,
+  Post,
   Param,
   Res,
   UseGuards,
@@ -56,6 +57,31 @@ export class PlayoutController {
       m3u8Content,
       logs: this.playoutService.getLogs(channelId).slice(-20),
     };
+  }
+
+  /**
+   * Inicia una salida RTMP individual si el canal está live.
+   * No requiere que el canal haya iniciado sus salidas automáticamente.
+   */
+  @Post(':channelId/outputs/:outputId/start')
+  @UseGuards(JwtAuthGuard)
+  startOutput(
+    @Param('channelId') channelId: string,
+    @Param('outputId') outputId: string,
+  ) {
+    return this.playoutService.startOutputNow(channelId, outputId);
+  }
+
+  /**
+   * Detiene una salida RTMP individual sin afectar el canal ni otras salidas.
+   */
+  @Post(':channelId/outputs/:outputId/stop')
+  @UseGuards(JwtAuthGuard)
+  stopOutput(
+    @Param('channelId') channelId: string,
+    @Param('outputId') outputId: string,
+  ) {
+    return this.playoutService.stopOutputNow(channelId, outputId);
   }
 
   /**

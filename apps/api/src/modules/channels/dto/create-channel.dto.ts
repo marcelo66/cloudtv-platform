@@ -5,6 +5,7 @@ import {
   MaxLength,
   IsOptional,
   Matches,
+  IsIn,
 } from 'class-validator';
 
 export class CreateChannelDto {
@@ -42,4 +43,10 @@ export class UpdateChannelDto {
   @IsString()
   @MaxLength(500)
   description?: string;
+
+  @ApiPropertyOptional({ enum: ['480p', '720p', '1080p'], description: 'Resolución / calidad de salida HLS' })
+  @IsOptional()
+  @IsString()
+  @IsIn(['480p', '720p', '1080p'])
+  videoQuality?: string;
 }

@@ -41,6 +41,14 @@ const MAX_RTMP_RETRIES = 5; // reintentos por salida RTMP antes de marcar ERROR 
 const FONT        = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf';
 const FONT_BOLD   = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
 
+/** Presets de calidad de emisión HLS.
+ *  El usuario elige en Ajustes del canal; se aplica al arrancar FFmpeg. */
+const VIDEO_QUALITY: Record<string, { scale: string; vBitrate: string; maxrate: string; bufsize: string; aBitrate: string }> = {
+  '480p':  { scale: '854:480',   vBitrate: '1000k', maxrate: '1200k', bufsize: '2000k', aBitrate: '96k'  },
+  '720p':  { scale: '1280:720',  vBitrate: '2500k', maxrate: '3000k', bufsize: '5000k', aBitrate: '128k' },
+  '1080p': { scale: '1920:1080', vBitrate: '4500k', maxrate: '5400k', bufsize: '9000k', aBitrate: '192k' },
+};
+
 /** URL base RTMP de cada plataforma conocida. */
 const RTMP_BASE: Record<string, string> = {
   [Platform.YOUTUBE]:     'rtmp://a.rtmp.youtube.com/live2',
@@ -254,8 +262,17 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     await fs.writeFile(concatPath, downloadedMp4s.map(f => `file '${f}'`).join('\n') + '\n');
     this.log(session, `concat.txt listo con ${downloadedMp4s.length} video(s)`);
 
-    // 4. Overlays
-    const scale = this.config.get('FFMPEG_SCALE', '854:480');
+    // 4. Calidad de emisión: leer del canal y resolver preset
+    const channelData = await this.prisma.channel.findUnique({
+      where: { id: session.channelId },
+      select: { videoQuality: true },
+    });
+    const qKey = channelData?.videoQuality ?? '480p';
+    const quality = VIDEO_QUALITY[qKey] ?? VIDEO_QUALITY['480p'];
+    const scale = quality.scale;
+    this.log(session, `Calidad: ${qKey} → ${scale} @ ${quality.vBitrate} video / ${quality.aBitrate} audio`);
+
+    // 5. Overlays
     const overlays = await this.overlaysService.getEnabledForChannel(session.channelId);
     const fontsOk   = await this.checkFontsAvailable();
 
@@ -274,7 +291,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       ? `Overlays activos: ${overlays.length} → filter_complex`
       : 'Sin overlays → encode directo');
 
-    // 5. FFmpeg HLS — encode único desde MP4 originales, sin pre-normalización
+    // 6. FFmpeg HLS — encode único desde MP4 originales, sin pre-normalización
     const m3u8Path = path.join(session.hlsDir, 'index.m3u8');
 
     const hlsArgs = [
@@ -292,9 +309,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       '-c:v', 'libx264',
       '-preset', this.config.get('FFMPEG_PRESET', 'ultrafast'),
       '-crf', '26',
-      '-b:v', '1000k', '-maxrate', '1200k', '-bufsize', '2000k',
+      '-b:v', quality.vBitrate, '-maxrate', quality.maxrate, '-bufsize', quality.bufsize,
       '-g', '50', '-sc_threshold', '0',
-      '-c:a', 'aac', '-b:a', '96k', '-ar', '44100', '-ac', '2',
+      '-c:a', 'aac', '-b:a', quality.aBitrate, '-ar', '44100', '-ac', '2',
     ];
 
     // Filtro de normalización para cuando no hay overlays (scale + fps + formato)
@@ -483,6 +500,50 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     };
 
     setTimeout(check, POLL_MS);
+  }
+
+  // ─── Control manual de salidas RTMP (independiente del canal) ────────────
+
+  /** Inicia una salida RTMP individual si el canal está en live.
+   *  Retorna éxito/error sin lanzar excepción (para respuesta HTTP limpia). */
+  async startOutputNow(channelId: string, outputId: string): Promise<{ success: boolean; message: string }> {
+    const session = this.sessions.get(channelId);
+    if (!session || session.stopping) {
+      return { success: false, message: 'El canal no está activo. Inicialo primero desde la sección Canal.' };
+    }
+    // Verificar que el m3u8 existe (canal realmente LIVE, no solo STARTING)
+    const m3u8 = path.join(session.hlsDir, 'index.m3u8');
+    try { await fs.access(m3u8); } catch {
+      return { success: false, message: 'El canal está iniciando. Esperá unos segundos a que esté LIVE.' };
+    }
+    // Ya está corriendo?
+    if (session.rtmpProcs.has(outputId)) {
+      return { success: false, message: 'La salida ya está transmitiendo.' };
+    }
+    const output = await this.prisma.streamOutput.findFirst({ where: { id: outputId, channelId } });
+    if (!output) {
+      return { success: false, message: 'Salida no encontrada.' };
+    }
+    this.startSingleRtmpOutput(session, output);
+    this.log(session, `RTMP [${output.name}] iniciado manualmente`);
+    return { success: true, message: `Salida "${output.name}" iniciada.` };
+  }
+
+  /** Detiene una salida RTMP individual sin afectar al canal ni a las otras salidas. */
+  async stopOutputNow(channelId: string, outputId: string): Promise<{ success: boolean; message: string }> {
+    const session = this.sessions.get(channelId);
+    if (session) {
+      const proc = session.rtmpProcs.get(outputId);
+      if (proc) {
+        try { proc.kill('SIGTERM'); } catch { /* ok */ }
+        session.rtmpProcs.delete(outputId);
+        session.rtmpRetries.delete(outputId);
+        const output = await this.prisma.streamOutput.findUnique({ where: { id: outputId } });
+        if (output) this.log(session, `RTMP [${output.name}] detenido manualmente`);
+      }
+    }
+    await this.streamOutputsService.updateStatus(outputId, 'IDLE');
+    return { success: true, message: 'Salida detenida.' };
   }
 
   // ─── RTMP outputs ─────────────────────────────────────────────

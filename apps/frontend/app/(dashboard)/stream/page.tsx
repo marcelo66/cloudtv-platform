@@ -13,9 +13,12 @@ import {
   ToggleRight,
   X,
   AlertCircle,
-  CheckCircle2,
   Loader2,
   ExternalLink,
+  Play,
+  Square,
+  RefreshCw,
+  Info,
 } from 'lucide-react';
 import { Header } from '@/components/dashboard/Header';
 import apiClient from '@/lib/api-client';
@@ -24,6 +27,8 @@ import {
   useCreateOutput,
   useUpdateOutput,
   useDeleteOutput,
+  useStartOutput,
+  useStopOutput,
   PLATFORM_META,
   type StreamOutput,
   type Platform,
@@ -37,9 +42,9 @@ import { toast } from 'sonner';
 const PLATFORMS: Platform[] = ['YOUTUBE', 'FACEBOOK', 'TWITCH', 'RTMP_CUSTOM'];
 
 const STATUS_CONFIG = {
-  IDLE:      { label: 'Inactivo', dot: 'bg-slate-500', text: 'text-slate-400' },
+  IDLE:      { label: 'Inactivo',      dot: 'bg-slate-500',            text: 'text-slate-400' },
   STREAMING: { label: 'Transmitiendo', dot: 'bg-green-500 animate-pulse', text: 'text-green-400' },
-  ERROR:     { label: 'Error', dot: 'bg-red-500', text: 'text-red-400' },
+  ERROR:     { label: 'Error',         dot: 'bg-red-500',              text: 'text-red-400' },
 } as const;
 
 function PlatformBadge({ platform, size = 'md' }: { platform: Platform; size?: 'sm' | 'md' }) {
@@ -77,15 +82,21 @@ function MaskedKey({ value }: { value: string }) {
 function OutputCard({
   output,
   channelId,
+  isChannelLive,
   onEdit,
   onDelete,
   onToggle,
+  onStart,
+  onStop,
 }: {
   output: StreamOutput;
   channelId: string;
+  isChannelLive: boolean;
   onEdit: (o: StreamOutput) => void;
   onDelete: (id: string) => void;
   onToggle: (o: StreamOutput) => void;
+  onStart: (o: StreamOutput) => void;
+  onStop: (o: StreamOutput) => void;
 }) {
   const meta   = PLATFORM_META[output.platform];
   const status = STATUS_CONFIG[output.status];
@@ -93,7 +104,7 @@ function OutputCard({
   return (
     <div className={cn(
       'glass-card p-4 transition-opacity',
-      !output.enabled && 'opacity-50',
+      !output.enabled && 'opacity-60',
     )}>
       <div className="flex items-start gap-3">
         <PlatformBadge platform={output.platform} />
@@ -104,7 +115,7 @@ function OutputCard({
           </div>
           {/* Status */}
           <div className="flex items-center gap-1.5 mt-1">
-            <div className={cn('w-2 h-2 rounded-full', status.dot)} />
+            <div className={cn('w-2 h-2 rounded-full flex-shrink-0', status.dot)} />
             <span className={cn('text-xs font-medium', status.text)}>{status.label}</span>
           </div>
           {/* RTMP URL */}
@@ -118,22 +129,53 @@ function OutputCard({
         </div>
       </div>
 
-      <div className="flex items-center gap-2 mt-3 pt-3 border-t border-surface-700">
+      {/* Botones de acción */}
+      <div className="flex items-center gap-2 mt-3 pt-3 border-t border-surface-700 flex-wrap">
+        {/* Toggle habilitado (auto-inicio cuando el canal arranca) */}
         <button
           onClick={() => onToggle(output)}
           className={cn(
             'flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded transition-colors',
             output.enabled
-              ? 'text-green-400 hover:bg-green-500/10'
-              : 'text-slate-500 hover:bg-slate-500/10',
+              ? 'text-slate-400 hover:bg-slate-500/10'
+              : 'text-slate-600 hover:bg-slate-500/10',
           )}
+          title={output.enabled ? 'Desactivar auto-inicio' : 'Activar auto-inicio cuando el canal arranca'}
         >
           {output.enabled
-            ? <><ToggleRight className="w-4 h-4" />Habilitada</>
-            : <><ToggleLeft className="w-4 h-4" />Deshabilitada</>
+            ? <><ToggleRight className="w-4 h-4 text-green-400" />Auto</>
+            : <><ToggleLeft className="w-4 h-4" />Auto</>
           }
         </button>
+
         <div className="flex-1" />
+
+        {/* Controles live: visibles siempre, con hint si canal no está live */}
+        {isChannelLive ? (
+          <>
+            {output.status !== 'STREAMING' && (
+              <button
+                onClick={() => onStart(output)}
+                className="flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-lg bg-green-600/20 text-green-400 hover:bg-green-600/30 border border-green-500/20 transition-colors"
+              >
+                <Play className="w-3 h-3" />
+                {output.status === 'ERROR' ? 'Reintentar' : 'Transmitir'}
+              </button>
+            )}
+            {output.status === 'STREAMING' && (
+              <button
+                onClick={() => onStop(output)}
+                className="flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-lg bg-red-600/20 text-red-400 hover:bg-red-600/30 border border-red-500/20 transition-colors"
+              >
+                <Square className="w-3 h-3" />
+                Detener
+              </button>
+            )}
+          </>
+        ) : (
+          <span className="text-xs text-slate-600 italic">Canal offline</span>
+        )}
+
         <button
           onClick={() => onEdit(output)}
           className="p-1.5 rounded text-slate-400 hover:text-white hover:bg-surface-700 transition-colors"
@@ -232,7 +274,7 @@ function OutputFormModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
 
-      <div className="relative bg-surface-800 border border-surface-700 rounded-2xl w-full max-w-md shadow-2xl">
+      <div className="relative bg-surface-800 border border-surface-700 rounded-2xl w-full max-w-md shadow-2xl max-h-[90vh] overflow-y-auto">
         {/* Header */}
         <div className="flex items-center justify-between p-5 border-b border-surface-700">
           <div className="flex items-center gap-2.5">
@@ -298,15 +340,34 @@ function OutputFormModal({
               value={rtmpUrl}
               onChange={e => setRtmpUrl(e.target.value)}
               readOnly={!isCustom}
-              placeholder={isCustom ? 'rtmp://tu-servidor.com/live' : meta.defaultRtmpUrl}
+              placeholder={isCustom ? 'rtmp://servidor.com:1935/aplicacion' : meta.defaultRtmpUrl}
               className={cn(
-                'w-full border rounded-lg px-3 py-2 text-sm focus:outline-none',
+                'w-full border rounded-lg px-3 py-2 text-sm focus:outline-none font-mono',
                 isCustom
                   ? 'bg-surface-700 border-surface-600 text-white placeholder-slate-500 focus:border-brand-500'
                   : 'bg-surface-900 border-surface-700 text-slate-400 cursor-not-allowed',
               )}
             />
-            {!isCustom && (
+            {isCustom ? (
+              /* Ayuda para auth Adobe RTMP */
+              <div className="mt-2 p-2.5 rounded-lg bg-blue-500/5 border border-blue-500/15 space-y-1">
+                <div className="flex items-start gap-1.5">
+                  <Info className="w-3 h-3 text-blue-400 flex-shrink-0 mt-0.5" />
+                  <p className="text-xs text-blue-300 font-medium">Autenticación Adobe RTMP</p>
+                </div>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Si el servidor requiere usuario y contraseña (error{' '}
+                  <code className="text-slate-300 text-[11px]">authmod=adobe</code>), incluilos
+                  directamente en la URL:
+                </p>
+                <code className="block text-[11px] text-green-400 bg-surface-900 rounded px-2 py-1 font-mono break-all">
+                  rtmp://usuario:contraseña@servidor:1935/app
+                </code>
+                <p className="text-xs text-slate-500">
+                  La stream key se adjunta al final automáticamente.
+                </p>
+              </div>
+            ) : (
               <p className="text-xs text-slate-500 mt-1">URL oficial de {meta.label} (no editable)</p>
             )}
           </div>
@@ -341,18 +402,21 @@ function OutputFormModal({
             </div>
             <p className="text-xs text-slate-500 mt-1 flex items-center gap-1">
               <AlertCircle className="w-3 h-3 flex-shrink-0" />
-              La stream key se almacena encriptada. No la compartas con nadie.
+              La stream key no se comparte con nadie.
             </p>
           </div>
 
           {/* Habilitado */}
           <div className="flex items-center justify-between pt-1 border-t border-surface-700">
-            <label className="text-xs font-medium text-slate-400">Habilitada al iniciar canal</label>
+            <div>
+              <p className="text-xs font-medium text-slate-400">Auto-inicio al arrancar canal</p>
+              <p className="text-xs text-slate-600 mt-0.5">Si está activa, inicia automáticamente cuando el canal arranca.</p>
+            </div>
             <button
               type="button"
               onClick={() => setEnabled(v => !v)}
               className={cn(
-                'flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border transition-colors',
+                'flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border transition-colors flex-shrink-0 ml-3',
                 enabled
                   ? 'border-green-500/30 bg-green-500/10 text-green-400'
                   : 'border-surface-600 bg-surface-700 text-slate-400',
@@ -398,11 +462,19 @@ export default function StreamPage() {
       setChannels(data);
       if (data.length > 0) setChannelId(data[0].id);
     }).catch(() => {});
+
+    // Refresh channel statuses cada 5s para reflejar live/offline
+    const interval = setInterval(() => {
+      apiClient.get('/channels').then(({ data }) => setChannels(data)).catch(() => {});
+    }, 5000);
+    return () => clearInterval(interval);
   }, []);
 
   const { data: outputs = [], isLoading } = useStreamOutputs(channelId);
   const deleteMut = useDeleteOutput();
   const updateMut = useUpdateOutput();
+  const startMut  = useStartOutput();
+  const stopMut   = useStopOutput();
 
   const handleOpenCreate = () => { setEditing(null); setShowModal(true); };
   const handleOpenEdit   = (o: StreamOutput) => { setEditing(o); setShowModal(true); };
@@ -415,6 +487,16 @@ export default function StreamPage() {
   const handleToggle = (o: StreamOutput) => {
     if (!channelId) return;
     updateMut.mutate({ channelId, id: o.id, input: { enabled: !o.enabled } });
+  };
+
+  const handleStart = (o: StreamOutput) => {
+    if (!channelId) return;
+    startMut.mutate({ channelId, id: o.id });
+  };
+
+  const handleStop = (o: StreamOutput) => {
+    if (!channelId) return;
+    stopMut.mutate({ channelId, id: o.id });
   };
 
   const streaming = outputs.filter(o => o.status === 'STREAMING').length;
@@ -447,7 +529,15 @@ export default function StreamPage() {
             </div>
           )}
           {channels.length === 1 && (
-            <span className="text-sm font-medium text-white">{channels[0].name}</span>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-white">{channels[0].name}</span>
+              <span className={cn(
+                'text-xs px-2 py-0.5 rounded-full font-medium',
+                isLive ? 'bg-green-500/10 text-green-400' : 'bg-slate-500/10 text-slate-400',
+              )}>
+                {isLive ? '● En vivo' : '○ Offline'}
+              </span>
+            </div>
           )}
 
           {/* Stats rápidas */}
@@ -483,13 +573,15 @@ export default function StreamPage() {
           </button>
         </div>
 
-        {/* Info banner cuando el canal está OFFLINE */}
+        {/* Info: canal offline pero con salidas */}
         {channelId && !isLive && outputs.length > 0 && (
           <div className="flex items-start gap-2.5 p-3.5 rounded-xl border border-yellow-500/20 bg-yellow-500/5 text-xs text-yellow-300">
             <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
             <div>
               <span className="font-semibold">El canal no está en vivo.</span>{' '}
-              Las salidas configuradas comenzarán a transmitir automáticamente cuando inicies el canal desde la sección <strong>Canal</strong>.
+              Las salidas con <strong>Auto</strong> activado arrancarán cuando inicies el canal.
+              También podés iniciar cada salida individualmente con el botón{' '}
+              <strong>Transmitir</strong> una vez que el canal esté live.
             </div>
           </div>
         )}
@@ -535,13 +627,10 @@ export default function StreamPage() {
         {/* Grid de salidas */}
         {outputs.length > 0 && (
           <div className="space-y-3">
-            {/* Cabecera informativa */}
-            <div className="flex items-center justify-between">
-              <p className="text-xs text-slate-500">
-                Las salidas habilitadas se activan automáticamente al iniciar el canal.
-                El stream se transmite vía <code className="text-slate-400">ffmpeg -re -i hls → flv/rtmp</code>.
-              </p>
-            </div>
+            <p className="text-xs text-slate-500">
+              Usá <strong className="text-slate-400">Auto</strong> para que la salida arranque con el canal,
+              o <strong className="text-slate-400">Transmitir</strong> para iniciarla manualmente cuando el canal ya esté live.
+            </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {outputs.map(o => (
@@ -549,9 +638,12 @@ export default function StreamPage() {
                   key={o.id}
                   output={o}
                   channelId={channelId!}
+                  isChannelLive={isLive}
                   onEdit={handleOpenEdit}
                   onDelete={handleDelete}
                   onToggle={handleToggle}
+                  onStart={handleStart}
+                  onStop={handleStop}
                 />
               ))}
             </div>

@@ -18,6 +18,7 @@ import {
   Save,
   Tv,
   Terminal,
+  Gauge,
 } from 'lucide-react';
 import { Header } from '@/components/dashboard/Header';
 import apiClient from '@/lib/api-client';
@@ -104,6 +105,35 @@ function todayRange() {
   return { from: start.toISOString(), to: end.toISOString() };
 }
 
+// ─── Quality presets ──────────────────────────────────────────────────────────
+
+const QUALITY_PRESETS = [
+  {
+    key: '480p',
+    label: '480p',
+    sublabel: 'SD',
+    vBitrate: '1.000 kbps',
+    aBitrate: '96 kbps',
+    scale: '854×480',
+  },
+  {
+    key: '720p',
+    label: '720p',
+    sublabel: 'HD',
+    vBitrate: '2.500 kbps',
+    aBitrate: '128 kbps',
+    scale: '1280×720',
+  },
+  {
+    key: '1080p',
+    label: '1080p',
+    sublabel: 'FHD',
+    vBitrate: '4.500 kbps',
+    aBitrate: '192 kbps',
+    scale: '1920×1080',
+  },
+] as const;
+
 // ─── component ────────────────────────────────────────────────────────────────
 
 export default function ChannelPage() {
@@ -157,6 +187,11 @@ export default function ChannelPage() {
   const handleSaveSettings = () => {
     if (!selectedId) return;
     update.mutate({ id: selectedId, data: { name: editName, description: editDesc } });
+  };
+
+  const handleQualityChange = (q: string) => {
+    if (!selectedId || q === channel?.videoQuality) return;
+    update.mutate({ id: selectedId, data: { videoQuality: q } });
   };
 
   const handleRegenKey = () => {
@@ -590,6 +625,55 @@ export default function ChannelPage() {
                   {update.isPending ? 'Guardando...' : 'Guardar cambios'}
                 </button>
               </div>
+            </div>
+
+            {/* Quality settings */}
+            <div className="glass-card p-5 space-y-4 lg:col-span-2">
+              <div className="flex items-center gap-2">
+                <Gauge className="w-4 h-4 text-slate-400" />
+                <h3 className="text-sm font-semibold text-white">Calidad de emisión</h3>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                {QUALITY_PRESETS.map((preset) => {
+                  const isActive = (channel.videoQuality ?? '480p') === preset.key;
+                  return (
+                    <button
+                      key={preset.key}
+                      onClick={() => handleQualityChange(preset.key)}
+                      disabled={update.isPending}
+                      className={cn(
+                        'rounded-xl border p-4 text-left transition-all disabled:cursor-not-allowed',
+                        isActive
+                          ? 'border-brand-500/50 bg-brand-500/10 ring-1 ring-brand-500/25'
+                          : 'border-white/10 bg-surface-700/40 hover:border-white/20 hover:bg-surface-700/60',
+                      )}
+                    >
+                      <div className="flex items-baseline gap-1.5 mb-2">
+                        <span className="text-base font-bold text-white">{preset.label}</span>
+                        <span className={cn('text-xs font-semibold', isActive ? 'text-brand-400' : 'text-slate-500')}>
+                          {preset.sublabel}
+                        </span>
+                      </div>
+                      <div className={cn('text-xs space-y-0.5', isActive ? 'text-slate-300' : 'text-slate-500')}>
+                        <div>Video: {preset.vBitrate}</div>
+                        <div>Audio: {preset.aBitrate}</div>
+                        <div className="text-[11px] opacity-60 mt-1 font-mono">{preset.scale}</div>
+                      </div>
+                      {isActive && (
+                        <div className="mt-2.5 flex items-center gap-1">
+                          <Check className="w-3 h-3 text-brand-400" />
+                          <span className="text-[11px] text-brand-400 font-medium">Seleccionada</span>
+                        </div>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <p className="text-xs text-slate-500 leading-relaxed">
+                El cambio aplica al <span className="text-slate-400">reiniciar el canal</span>. Si el canal está en vivo, detenelo y volvé a iniciarlo para que tome efecto la nueva calidad.
+              </p>
             </div>
 
             {/* Danger zone */}
