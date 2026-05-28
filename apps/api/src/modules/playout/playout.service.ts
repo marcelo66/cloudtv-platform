@@ -26,6 +26,8 @@ interface PlayoutSession {
   restarts: number;
   /** outputId → proceso FFmpeg de re-streaming RTMP */
   rtmpProcs: Map<string, ChildProcess>;
+  /** outputId → número de reintentos consecutivos fallidos */
+  rtmpRetries: Map<string, number>;
   /** true → omitir overlays aunque estén configurados (fallback por falla rápida) */
   overlaysDisabled: boolean;
   /** Incrementa con cada nuevo lanzamiento FFmpeg para cancelar polls anteriores */
@@ -34,7 +36,8 @@ interface PlayoutSession {
 
 const HLS_BASE    = path.join('/tmp', 'cloudtv-hls');
 const MAX_LOGS    = 300;
-const MAX_RESTARTS = 5;
+const MAX_RESTARTS    = 5;
+const MAX_RTMP_RETRIES = 5; // reintentos por salida RTMP antes de marcar ERROR permanente
 const FONT        = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf';
 const FONT_BOLD   = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
 
@@ -109,6 +112,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       recentLogs: [],
       restarts: 0,
       rtmpProcs: new Map(),
+      rtmpRetries: new Map(),
       overlaysDisabled: false,
       pollToken: 0,
     };
@@ -323,7 +327,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           ...hlsArgs,
         ];
 
-    this.log(session, `Lanzando FFmpeg HLS${overlayFilter ? ' + overlays' : ' (copy)'}...`);
+    this.log(session, `Lanzando FFmpeg HLS${overlayFilter ? ' + overlays' : ''}...`);
 
     let spawnedAt = Date.now(); // se ajusta en el evento 'spawn'
     const hadOverlays = !!overlayFilter;
@@ -496,6 +500,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     });
 
     proc.on('spawn', () => {
+      session.rtmpRetries.delete(output.id); // conexión exitosa → resetear contador
       this.streamOutputsService.updateStatus(output.id, 'STREAMING').catch(() => {});
     });
 
@@ -503,15 +508,26 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       session.rtmpProcs.delete(output.id);
       this.log(session, `RTMP ${safeName} terminó (code=${code} sig=${sig})`);
 
-      if (!session.stopping) {
-        await this.streamOutputsService.updateStatus(output.id, 'ERROR').catch(() => {});
-        this.log(session, `RTMP ${safeName} reintentando en 10s...`);
-        setTimeout(() => {
-          if (!session.stopping) this.startSingleRtmpOutput(session, output);
-        }, 10_000);
-      } else {
+      if (session.stopping) {
         await this.streamOutputsService.updateStatus(output.id, 'IDLE').catch(() => {});
+        return;
       }
+
+      const retries = (session.rtmpRetries.get(output.id) ?? 0) + 1;
+      session.rtmpRetries.set(output.id, retries);
+
+      if (retries >= MAX_RTMP_RETRIES) {
+        this.log(session, `RTMP ${safeName} ERROR: ${retries} fallos consecutivos → desactivado. Revisá la URL/credenciales en Salidas de stream.`);
+        await this.streamOutputsService.updateStatus(output.id, 'ERROR').catch(() => {});
+        return;
+      }
+
+      await this.streamOutputsService.updateStatus(output.id, 'ERROR').catch(() => {});
+      const delay = Math.min(10_000 * retries, 60_000); // backoff: 10s, 20s, 30s... máx 60s
+      this.log(session, `RTMP ${safeName} reintentando en ${delay / 1000}s (intento ${retries}/${MAX_RTMP_RETRIES})...`);
+      setTimeout(() => {
+        if (!session.stopping) this.startSingleRtmpOutput(session, output);
+      }, delay);
     });
 
     proc.on('error', (err) => {
@@ -531,6 +547,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       }
     }
     session.rtmpProcs.clear();
+    session.rtmpRetries.clear();
   }
 
   /** Construye la URL RTMP completa para el destino (base + stream key). */
