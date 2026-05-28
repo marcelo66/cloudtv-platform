@@ -296,10 +296,14 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     // Filtro de normalización para cuando no hay overlays (scale + fps + formato)
     const normalizeVf = `scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,fps=25,format=yuv420p`;
 
+    // -re: leer a velocidad real (1×) → imprescindible para live HLS
+    // Sin -re FFmpeg encodes 50× más rápido, los segmentos se generan en segundos,
+    // el playlist borra los viejos antes de que el player pueda cargarlos → 404 fatal.
     // -stream_loop -1: bucle infinito del playlist para broadcast 24/7
     const args: string[] = overlayFilter
       ? [
           '-loglevel', 'warning',
+          '-re',
           '-stream_loop', '-1',
           '-f', 'concat', '-safe', '0', '-i', concatPath,
           ...overlayFilter.extraInputArgs,
@@ -311,6 +315,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         ]
       : [
           '-loglevel', 'warning',
+          '-re',
           '-stream_loop', '-1',
           '-f', 'concat', '-safe', '0', '-i', concatPath,
           '-vf', normalizeVf,
@@ -332,7 +337,12 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     proc.stderr.on('data', (chunk: Buffer) => {
       chunk.toString().split('\n').forEach(l => {
         const t = l.trim();
-        if (t) this.log(session, `ffmpeg: ${t}`);
+        if (!t) return;
+        // Suprimir "Late SEI is not implemented" — warning inofensivo del decoder
+        // H.264 en los archivos de entrada; no afecta la salida re-encodada
+        if (t.includes('Late SEI') || t.includes('late_sei') ||
+            t.includes('streams.videolan.org') || t.includes('ffmpeg-devel')) return;
+        this.log(session, `ffmpeg: ${t}`);
       });
     });
 
