@@ -195,7 +195,14 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
   private killSession(s: PlayoutSession) {
     if (s.process && !s.process.killed) {
-      try { s.process.kill('SIGTERM'); } catch { /* ok */ }
+      const p = s.process;
+      try { p.kill('SIGTERM'); } catch { /* ok */ }
+      // SIGKILL fallback: si SIGTERM no es suficiente (proceso bloqueado, Docker PID≠1)
+      setTimeout(() => {
+        if (p && !p.killed) {
+          try { p.kill('SIGKILL'); } catch { /* ok */ }
+        }
+      }, 3000);
     }
   }
 
@@ -375,6 +382,12 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       this.log(session, `[DIAG] filter_complex (${fc.length}ch): ${fc.length > 700 ? fc.substring(0, 700) + '...' : fc}`);
     }
 
+    // Verificar que no se haya pedido un stop mientras se descargaban videos / se construían overlays
+    if (session.stopping) {
+      this.log(session, 'Stop solicitado antes de lanzar FFmpeg → cancelando');
+      return;
+    }
+
     let spawnedAt = Date.now(); // se ajusta en el evento 'spawn'
     const hadOverlays = !!overlayFilter;
 
@@ -383,6 +396,14 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       cwd: session.hlsDir,
     });
     session.process = proc;
+
+    // Doble-check: si el stop llegó justo entre el check de arriba y el spawn, matar el proceso recién creado
+    if (session.stopping) {
+      this.log(session, 'Stop detectado post-spawn → matando proceso inmediatamente');
+      try { proc.kill('SIGTERM'); } catch { /* ok */ }
+      session.process = null;
+      return;
+    }
 
     proc.stderr.on('data', (chunk: Buffer) => {
       chunk.toString().split('\n').forEach(l => {
@@ -418,7 +439,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         this.log(session, `ERROR: FFmpeg con overlays falló en ${uptime}ms (code=${code}) → ver [DIAG] filter_complex y errores "ffmpeg:" arriba`);
         this.log(session, 'WARN: Overlay fallback activado → reintentando sin overlays');
         this.stopRtmpOutputs(session, false);
-        setTimeout(() => this.launchFfmpeg(session), 2000);
+        setTimeout(() => {
+          if (session.stopping || !this.sessions.has(session.channelId)) return;
+          this.launchFfmpeg(session);
+        }, 2000);
         return;
       }
 
@@ -427,7 +451,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       if (isCleanExit) {
         this.log(session, 'Playlist completada (code=0) → reiniciando en 1s...');
         this.stopRtmpOutputs(session, false);
-        setTimeout(() => this.launchFfmpeg(session), 1000);
+        setTimeout(() => {
+          if (session.stopping || !this.sessions.has(session.channelId)) return;
+          this.launchFfmpeg(session);
+        }, 1000);
         return;
       }
 
@@ -437,6 +464,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         this.log(session, `ERROR: Máximo de reinicios (${MAX_RESTARTS}) alcanzado → canal en ERROR. Revisá los logs para diagnosticar.`);
         // Marcar stopping para cancelar polls pendientes de waitForM3u8
         session.stopping = true;
+        this.sessions.delete(session.channelId);
         this.prisma.channel.update({
           where: { id: session.channelId },
           data: { status: 'ERROR' },
@@ -446,7 +474,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
       this.log(session, `Loop: reinicio #${session.restarts}/${MAX_RESTARTS} en 3s...`);
       this.stopRtmpOutputs(session, false);
-      setTimeout(() => this.launchFfmpeg(session), 3000);
+      setTimeout(() => {
+        if (session.stopping || !this.sessions.has(session.channelId)) return;
+        this.launchFfmpeg(session);
+      }, 3000);
     });
 
     proc.on('error', async (err) => {
@@ -617,7 +648,8 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       const delay = Math.min(10_000 * retries, 60_000); // backoff: 10s, 20s, 30s... máx 60s
       this.log(session, `RTMP ${safeName} reintentando en ${delay / 1000}s (intento ${retries}/${MAX_RTMP_RETRIES})...`);
       setTimeout(() => {
-        if (!session.stopping) this.startSingleRtmpOutput(session, output);
+        if (session.stopping || !this.sessions.has(session.channelId)) return;
+        this.startSingleRtmpOutput(session, output);
       }, delay);
     });
 

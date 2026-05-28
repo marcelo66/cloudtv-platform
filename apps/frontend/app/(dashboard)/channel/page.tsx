@@ -423,6 +423,49 @@ export default function ChannelPage() {
                     <p className="text-xs text-slate-500">Playlists</p>
                   </div>
                 </div>
+
+                {/* Quality quick-selector */}
+                <div className="pt-3 border-t border-white/5 space-y-2">
+                  <div className="flex items-center gap-1.5">
+                    <Gauge className="w-3.5 h-3.5 text-slate-500" />
+                    <span className="text-xs font-medium text-slate-400">Calidad de emisión</span>
+                    <span className="ml-auto text-[11px] font-mono text-slate-500">
+                      {(() => {
+                        const q = QUALITY_PRESETS.find(p => p.key === (channel.videoQuality ?? '480p'));
+                        return q ? `${q.vBitrate} v / ${q.aBitrate} a` : '';
+                      })()}
+                    </span>
+                  </div>
+                  <div className="flex gap-1.5">
+                    {QUALITY_PRESETS.map((preset) => {
+                      const isActive = (channel.videoQuality ?? '480p') === preset.key;
+                      return (
+                        <button
+                          key={preset.key}
+                          onClick={() => handleQualityChange(preset.key)}
+                          disabled={update.isPending}
+                          title={`Video: ${preset.vBitrate} | Audio: ${preset.aBitrate} | ${preset.scale}`}
+                          className={cn(
+                            'flex-1 py-1.5 rounded-lg text-xs font-semibold transition-all',
+                            isActive
+                              ? 'bg-brand-600/25 text-white border border-brand-500/50'
+                              : 'bg-surface-700/50 text-slate-500 hover:text-slate-300 border border-white/5 hover:border-white/15',
+                          )}
+                        >
+                          {preset.label}
+                          <span className={cn('block text-[10px] font-normal', isActive ? 'text-brand-400' : 'text-slate-600')}>
+                            {preset.sublabel}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {isLive && (
+                    <p className="text-[11px] text-slate-600 leading-tight">
+                      Aplica al reiniciar el canal
+                    </p>
+                  )}
+                </div>
               </div>
 
               {/* Today's schedule */}
