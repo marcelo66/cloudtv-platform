@@ -189,10 +189,16 @@ model StreamOutput {
   channel   Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
   name      String
   platform  Platform
-  rtmpUrl   String       @map("rtmp_url")
-  streamKey String       @map("stream_key")
+  // RTMP: URL base del servidor. SRT_CALLER: host/IP de destino. SRT_LISTENER: ignorado.
+  rtmpUrl   String       @default("") @map("rtmp_url")
+  // RTMP: stream key. SRT: no se usa (vacío).
+  streamKey String       @default("") @map("stream_key")
   enabled   Boolean      @default(true)
   status    OutputStatus @default(IDLE)
+  // ── Campos exclusivos SRT ────────────────────────────────────────────────
+  srtPort       Int?    @map("srt_port")       // Puerto SRT (default: 9001)
+  srtLatency    Int?    @map("srt_latency")     // Latencia en milisegundos (default: 120 ms)
+  srtPassphrase String? @map("srt_passphrase")  // Passphrase de cifrado AES (10-79 chars, opcional)
   createdAt DateTime     @default(now()) @map("created_at")
   updatedAt DateTime     @updatedAt @map("updated_at")
 
@@ -348,6 +354,8 @@ enum Platform {
   FACEBOOK
   TWITCH
   RTMP_CUSTOM
+  SRT_CALLER    // Enviar SRT a un destino conocido (cablera, encoder remoto, peer ZeroTier)
+  SRT_LISTENER  // Escuchar conexiones SRT entrantes en un puerto local
 }
 
 enum OutputStatus {

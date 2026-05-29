@@ -56,13 +56,17 @@ const VIDEO_QUALITY: Record<string, { scale: string; vBitrate: string; maxrate: 
   '1080p': { scale: '1920:1080', vBitrate: '4500k', maxrate: '5400k', bufsize: '9000k', aBitrate: '192k' },
 };
 
-/** URL base RTMP de cada plataforma conocida. */
+/** URL base RTMP de cada plataforma conocida. SRT no usa este mapa. */
 const RTMP_BASE: Record<string, string> = {
-  [Platform.YOUTUBE]:     'rtmp://a.rtmp.youtube.com/live2',
-  [Platform.FACEBOOK]:    'rtmps://live-api-s.facebook.com:443/rtmp',
-  [Platform.TWITCH]:      'rtmp://live.twitch.tv/app',
-  [Platform.RTMP_CUSTOM]: '',
+  [Platform.YOUTUBE]:      'rtmp://a.rtmp.youtube.com/live2',
+  [Platform.FACEBOOK]:     'rtmps://live-api-s.facebook.com:443/rtmp',
+  [Platform.TWITCH]:       'rtmp://live.twitch.tv/app',
+  [Platform.RTMP_CUSTOM]:  '',
+  [Platform.SRT_CALLER]:   '',
+  [Platform.SRT_LISTENER]: '',
 };
+
+const SRT_PLATFORMS = new Set<Platform>([Platform.SRT_CALLER, Platform.SRT_LISTENER]);
 
 @Injectable()
 export class PlayoutService implements OnModuleInit, OnModuleDestroy {
@@ -802,18 +806,22 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     if (session.stopping) return;
     if (session.rtmpProcs.has(output.id)) return; // ya corre
 
-    const target = this.buildRtmpTarget(output);
+    const isSrt  = SRT_PLATFORMS.has(output.platform);
+    const target = isSrt ? this.buildSrtTarget(output) : this.buildRtmpTarget(output);
+    const format = isSrt ? 'mpegts' : 'flv';
     const m3u8   = path.join(session.hlsDir, 'index.m3u8');
-    // Ocultar stream key en los logs (mostrar solo los últimos 4 caracteres)
     const safeName = `[${output.name}/${output.platform}]`;
-    const safeTarget = target.replace(/\/([^\/]+)$/, '/***');
+    // Para logs: ocultar passphrase o stream key
+    const safeTarget = isSrt
+      ? target.replace(/passphrase=[^&]+/, 'passphrase=***')
+      : target.replace(/\/([^\/]+)$/, '/***');
 
     const proc = spawn('ffmpeg', [
       '-loglevel', 'warning',
       '-re',
       '-i', m3u8,
       '-c', 'copy',
-      '-f', 'flv',
+      '-f', format,
       target,
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
@@ -883,6 +891,41 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
   private buildRtmpTarget(output: StreamOutput): string {
     const base = (output.rtmpUrl?.trim() || RTMP_BASE[output.platform] || '').replace(/\/$/, '');
     return output.streamKey ? `${base}/${output.streamKey}` : base;
+  }
+
+  /**
+   * Construye la URL SRT para salidas SRT_CALLER y SRT_LISTENER.
+   *
+   * Formato FFmpeg SRT:
+   *   Caller:   srt://HOST:PORT?mode=caller&latency=LATENCY_US[&passphrase=PASS]
+   *   Listener: srt://:PORT?mode=listener&latency=LATENCY_US[&passphrase=PASS]
+   *
+   * latency en FFmpeg: microsegundos (ms × 1000).
+   */
+  private buildSrtTarget(output: StreamOutput): string {
+    // Acceder con any porque los campos SRT se añaden en la misma migración y
+    // estarán en el tipo Prisma generado en el build del deploy.
+    const o = output as any;
+    const port      = (o.srtPort      as number  | null | undefined) ?? 9001;
+    const latencyMs = (o.srtLatency   as number  | null | undefined) ?? 120;
+    const passphrase = (o.srtPassphrase as string | null | undefined)?.trim() ?? '';
+    const latencyUs  = latencyMs * 1000; // ms → µs (unidad que usa FFmpeg para SRT)
+
+    const params: string[] = [];
+    if (output.platform === Platform.SRT_LISTENER) {
+      params.push('mode=listener');
+    } else {
+      params.push('mode=caller');
+    }
+    params.push(`latency=${latencyUs}`);
+    if (passphrase) params.push(`passphrase=${passphrase}`);
+
+    if (output.platform === Platform.SRT_LISTENER) {
+      return `srt://:${port}?${params.join('&')}`;
+    }
+
+    const host = output.rtmpUrl?.trim() || '127.0.0.1';
+    return `srt://${host}:${port}?${params.join('&')}`;
   }
 
   // ─── Font check ────────────────────────────────────────────────

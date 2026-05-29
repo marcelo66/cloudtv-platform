@@ -3,13 +3,17 @@ import { Platform } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateStreamOutputDto, UpdateStreamOutputDto } from './dto/stream-output.dto';
 
-/** URL base de cada plataforma (sin stream key). */
+/** URL base de cada plataforma RTMP (sin stream key). SRT no usa este campo. */
 export const PLATFORM_RTMP_BASE: Record<string, string> = {
-  YOUTUBE:  'rtmp://a.rtmp.youtube.com/live2',
-  FACEBOOK: 'rtmps://live-api-s.facebook.com:443/rtmp',
-  TWITCH:   'rtmp://live.twitch.tv/app',
-  RTMP_CUSTOM: '',
+  YOUTUBE:      'rtmp://a.rtmp.youtube.com/live2',
+  FACEBOOK:     'rtmps://live-api-s.facebook.com:443/rtmp',
+  TWITCH:       'rtmp://live.twitch.tv/app',
+  RTMP_CUSTOM:  '',
+  SRT_CALLER:   '',
+  SRT_LISTENER: '',
 };
+
+const SRT_PLATFORMS = new Set<Platform>([Platform.SRT_CALLER, Platform.SRT_LISTENER]);
 
 @Injectable()
 export class StreamOutputsService {
@@ -35,18 +39,30 @@ export class StreamOutputsService {
   async create(channelId: string, userId: string, dto: CreateStreamOutputDto) {
     await this.verifyOwnership(channelId, userId);
 
-    // Auto-completar rtmpUrl para plataformas conocidas
-    const rtmpUrl = dto.rtmpUrl?.trim() || PLATFORM_RTMP_BASE[dto.platform] || '';
+    const isSrt = SRT_PLATFORMS.has(dto.platform);
+
+    // RTMP: auto-completar URL de plataformas conocidas
+    // SRT_CALLER: rtmpUrl = host de destino (sin auto-complete)
+    // SRT_LISTENER: rtmpUrl vacío
+    const rtmpUrl = isSrt
+      ? (dto.platform === Platform.SRT_CALLER ? (dto.rtmpUrl?.trim() ?? '') : '')
+      : (dto.rtmpUrl?.trim() || PLATFORM_RTMP_BASE[dto.platform] || '');
+
+    const streamKey = isSrt ? '' : (dto.streamKey?.trim() ?? '');
 
     return this.prisma.streamOutput.create({
       data: {
         channelId,
-        name: dto.name.trim(),
+        name:     dto.name.trim(),
         platform: dto.platform,
         rtmpUrl,
-        streamKey: dto.streamKey.trim(),
-        enabled: dto.enabled ?? true,
-        status: 'IDLE',
+        streamKey,
+        enabled:  dto.enabled ?? true,
+        status:   'IDLE',
+        // SRT
+        srtPort:       dto.srtPort       ?? null,
+        srtLatency:    dto.srtLatency    ?? null,
+        srtPassphrase: dto.srtPassphrase ?? null,
       },
     });
   }
@@ -59,10 +75,14 @@ export class StreamOutputsService {
     return this.prisma.streamOutput.update({
       where: { id },
       data: {
-        ...(dto.name !== undefined      && { name: dto.name.trim() }),
-        ...(dto.rtmpUrl !== undefined   && { rtmpUrl: dto.rtmpUrl.trim() }),
+        ...(dto.name      !== undefined && { name:      dto.name.trim() }),
+        ...(dto.rtmpUrl   !== undefined && { rtmpUrl:   dto.rtmpUrl.trim() }),
         ...(dto.streamKey !== undefined && { streamKey: dto.streamKey.trim() }),
-        ...(dto.enabled !== undefined   && { enabled: dto.enabled }),
+        ...(dto.enabled   !== undefined && { enabled:   dto.enabled }),
+        // SRT
+        ...(dto.srtPort       !== undefined && { srtPort:       dto.srtPort }),
+        ...(dto.srtLatency    !== undefined && { srtLatency:    dto.srtLatency }),
+        ...(dto.srtPassphrase !== undefined && { srtPassphrase: dto.srtPassphrase }),
       },
     });
   }

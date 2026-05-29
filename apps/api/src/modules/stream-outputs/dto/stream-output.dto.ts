@@ -4,7 +4,10 @@ import {
   IsBoolean,
   IsOptional,
   IsNotEmpty,
-  IsUrl,
+  IsInt,
+  Min,
+  Max,
+  MaxLength,
 } from 'class-validator';
 import { Platform } from '@prisma/client';
 
@@ -16,22 +19,52 @@ export class CreateStreamOutputDto {
   @IsEnum(Platform)
   platform: Platform;
 
-  /** URL base RTMP del servidor (sin la stream key).
-   *  Para YouTube/Facebook/Twitch se auto-completa en el servicio.
-   *  Para RTMP_CUSTOM el usuario debe proveerla.
+  /**
+   * RTMP:        URL base del servidor (ej: rtmp://servidor:1935/app)
+   * SRT_CALLER:  host / IP de destino (ej: 10.147.17.5)
+   * SRT_LISTENER: ignorado
+   * Para YouTube/Facebook/Twitch se auto-completa en el servicio.
    */
   @IsString()
   @IsOptional()
   rtmpUrl?: string;
 
-  /** Stream key de la plataforma (se adjunta al rtmpUrl en FFmpeg). */
+  /**
+   * RTMP: stream key de la plataforma.
+   * SRT:  no se usa; puede omitirse o enviarse vacío.
+   */
   @IsString()
-  @IsNotEmpty()
-  streamKey: string;
+  @IsOptional()
+  streamKey?: string;
 
   @IsBoolean()
   @IsOptional()
   enabled?: boolean;
+
+  // ── SRT-only fields ────────────────────────────────────────────────────────
+
+  /** Puerto SRT (1-65535). Default: 9001. */
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  @IsOptional()
+  srtPort?: number;
+
+  /** Latencia SRT en milisegundos (20-8000 ms). Default: 120 ms. */
+  @IsInt()
+  @Min(20)
+  @Max(8000)
+  @IsOptional()
+  srtLatency?: number;
+
+  /**
+   * Passphrase de cifrado AES (10-79 caracteres).
+   * Vacío / omitido = sin cifrado.
+   */
+  @IsString()
+  @IsOptional()
+  @MaxLength(79)
+  srtPassphrase?: string;
 }
 
 export class UpdateStreamOutputDto {
@@ -45,11 +78,27 @@ export class UpdateStreamOutputDto {
   rtmpUrl?: string;
 
   @IsString()
-  @IsNotEmpty()
   @IsOptional()
   streamKey?: string;
 
   @IsBoolean()
   @IsOptional()
   enabled?: boolean;
+
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  @IsOptional()
+  srtPort?: number;
+
+  @IsInt()
+  @Min(20)
+  @Max(8000)
+  @IsOptional()
+  srtLatency?: number;
+
+  @IsString()
+  @IsOptional()
+  @MaxLength(79)
+  srtPassphrase?: string;
 }

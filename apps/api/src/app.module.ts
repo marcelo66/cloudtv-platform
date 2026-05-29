@@ -16,6 +16,7 @@ import { StreamOutputsModule } from './modules/stream-outputs/stream-outputs.mod
 import { AdBlocksModule } from './modules/ad-blocks/ad-blocks.module';
 import { CuePointsModule } from './modules/cue-points/cue-points.module';
 import { AdReportsModule } from './modules/ad-reports/ad-reports.module';
+import { ZeroTierModule } from './modules/zerotier/zerotier.module';
 
 @Module({
   imports: [
@@ -58,6 +59,7 @@ import { AdReportsModule } from './modules/ad-reports/ad-reports.module';
     AdBlocksModule,
     CuePointsModule,
     AdReportsModule,
+    ZeroTierModule,
     WorkerModule,
   ],
 })
