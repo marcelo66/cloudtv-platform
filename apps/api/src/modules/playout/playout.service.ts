@@ -45,6 +45,8 @@ interface PlayoutSession {
   activeIngestId: string | null;
   /** Proceso FFmpeg de ingesta activo */
   ingestProcess: ChildProcess | null;
+  /** Proceso yt-dlp activo (solo para tipo YOUTUBE, piped a ingestProcess) */
+  ytDlpProcess: ChildProcess | null;
 }
 
 const HLS_BASE    = path.join('/tmp', 'cloudtv-hls');
@@ -151,6 +153,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       scheduleWatchTimer: null,
       activeIngestId: null,
       ingestProcess: null,
+      ytDlpProcess: null,
     };
     this.sessions.set(channelId, session);
 
@@ -210,6 +213,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         session.scheduleWatchTimer = null;
       }
       // Matar proceso de ingesta si existe
+      if (session.ytDlpProcess && !session.ytDlpProcess.killed) {
+        try { session.ytDlpProcess.kill('SIGTERM'); } catch { /* ok */ }
+      }
+      session.ytDlpProcess = null;
       if (session.ingestProcess && !session.ingestProcess.killed) {
         try { session.ingestProcess.kill('SIGTERM'); } catch { /* ok */ }
       }
@@ -1279,6 +1286,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     if (session.activeIngestId && session.activeIngestId !== ingestId) {
       const prevId = session.activeIngestId;
       session.activeIngestId = null;
+      if (session.ytDlpProcess && !session.ytDlpProcess.killed) {
+        try { session.ytDlpProcess.kill('SIGTERM'); } catch { /* ok */ }
+      }
+      session.ytDlpProcess = null;
       if (session.ingestProcess && !session.ingestProcess.killed) {
         try { session.ingestProcess.kill('SIGTERM'); } catch { /* ok */ }
       }
@@ -1325,8 +1336,13 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     const ingestId = session.activeIngestId;
     this.log(session, `INGEST: Desactivando "${ingestId}" → retomando programación normal`);
 
-    // Limpiar ANTES de matar el proceso (el close handler chequeará activeIngestId === null)
+    // Limpiar ANTES de matar los procesos (el close handler chequeará activeIngestId === null)
     session.activeIngestId = null;
+
+    if (session.ytDlpProcess && !session.ytDlpProcess.killed) {
+      try { session.ytDlpProcess.kill('SIGTERM'); } catch { /* ok */ }
+    }
+    session.ytDlpProcess = null;
 
     if (session.ingestProcess && !session.ingestProcess.killed) {
       try { session.ingestProcess.kill('SIGTERM'); } catch { /* ok */ }
@@ -1351,52 +1367,52 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Lanza el proceso FFmpeg para una fuente de ingesta.
-   * Escribe HLS en la misma ruta que la playlist normal.
+   * Para YOUTUBE usa pipe yt-dlp → FFmpeg (stdin) para evitar URLs expiradas.
+   * Para SRT/RTMP FFmpeg conecta directamente.
    */
   private async launchIngestFfmpeg(session: PlayoutSession, source: any): Promise<void> {
     if (session.stopping || !session.activeIngestId) return;
 
-    const m3u8Path   = path.join(session.hlsDir, 'index.m3u8');
-    const hlsArgs = [
-      '-f',                     'hls',
-      '-hls_time',              '4',
-      '-hls_list_size',         '10',
-      '-hls_flags',             'delete_segments+append_list+independent_segments+omit_endlist',
+    const m3u8Path = path.join(session.hlsDir, 'index.m3u8');
+    const hlsArgs  = [
+      '-f',                       'hls',
+      '-hls_time',                '4',
+      '-hls_list_size',           '10',
+      '-hls_flags',               'delete_segments+append_list+independent_segments+omit_endlist',
       '-hls_start_number_source', 'epoch',
-      '-hls_segment_type',      'mpegts',
-      '-hls_segment_filename',  'seg%d.ts',
-      '-y',                     'index.m3u8',
+      '-hls_segment_type',        'mpegts',
+      '-hls_segment_filename',    'seg%d.ts',
+      '-y',                       'index.m3u8',
     ];
 
-    // ─── Armar args de entrada según el tipo de fuente ──────────
+    // ─── Armar input según tipo ──────────────────────────────────
     let inputArgs: string[] = [];
     let waitMaxMs: number | undefined;
+    let ytDlpProc: ChildProcess | null = null; // solo para YOUTUBE
 
     switch (source.type as string) {
+
+      // ── YouTube: yt-dlp piped a FFmpeg ──────────────────────────
+      // NO se extrae la URL previamente — esas URLs de YouTube expiran en segundos.
+      // yt-dlp escribe el stream a su stdout; FFmpeg lo lee desde stdin (pipe:0).
       case 'YOUTUBE': {
-        this.log(session, 'INGEST: Extrayendo URL de YouTube con yt-dlp...');
-        const ytUrl = await this.extractYouTubeUrl(source.url);
-        if (!ytUrl) {
-          const msg = 'INGEST ERROR: No se pudo obtener la URL de YouTube. Verificá que yt-dlp esté instalado y que la URL sea válida.';
-          this.log(session, msg);
-          await this.prisma.ingestSource.update({ where: { id: source.id }, data: { status: 'ERROR' } }).catch(() => {});
-          if (session.activeIngestId === source.id) {
-            session.activeIngestId = null;
-            this.launchFfmpeg(session).catch(() => {});
-          }
-          return;
-        }
-        this.log(session, `INGEST: URL YouTube obtenida → ${ytUrl.substring(0, 80)}...`);
-        inputArgs = ['-i', ytUrl];
+        this.log(session, 'INGEST: Iniciando yt-dlp → FFmpeg pipe para YouTube Live...');
+        ytDlpProc = spawn('yt-dlp', [
+          '--no-playlist',
+          '-f', 'best[height<=720]/best',
+          '-o', '-',          // stream a stdout
+          source.url,
+        ], { stdio: ['ignore', 'pipe', 'pipe'] });
+        session.ytDlpProcess = ytDlpProc;
+        inputArgs = ['-i', 'pipe:0']; // FFmpeg leerá desde stdin
         break;
       }
 
       case 'SRT_CALLER': {
-        const latencyUs = ((source.srtLatency as number | null) ?? 120) * 1000;
+        const latencyUs = ((source.srtLatency as number | null) ?? 120) * 1_000;
         const pass      = (source.srtPassphrase as string | null)?.trim() ?? '';
-        // url almacena "host" (sin puerto) — el puerto viene de srtPort
-        const host = (source.url as string)?.trim() || '127.0.0.1';
-        const port = (source.srtPort as number | null) ?? 9000;
+        const host      = (source.url as string)?.trim() || '127.0.0.1';
+        const port      = (source.srtPort as number | null) ?? 9000;
         let srtUrl = `srt://${host}:${port}?mode=caller&latency=${latencyUs}`;
         if (pass) srtUrl += `&passphrase=${pass}`;
         this.log(session, `INGEST: SRT Caller → srt://${host}:${port}`);
@@ -1405,7 +1421,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       }
 
       case 'SRT_LISTENER': {
-        const latencyUs = ((source.srtLatency as number | null) ?? 120) * 1000;
+        const latencyUs = ((source.srtLatency as number | null) ?? 120) * 1_000;
         const pass      = (source.srtPassphrase as string | null)?.trim() ?? '';
         const port      = (source.srtPort as number | null) ?? 9000;
         let srtUrl = `srt://:${port}?mode=listener&latency=${latencyUs}`;
@@ -1421,7 +1437,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         const key  = (source.rtmpKey  as string | null)?.trim() || 'live';
         this.log(session, `INGEST: RTMP Push → escuchando en rtmp://0.0.0.0:${port}/live/${key}`);
         inputArgs = ['-listen', '1', '-i', `rtmp://0.0.0.0:${port}/live/${key}`];
-        waitMaxMs = 0; // sin límite — FFmpeg espera que el encoder conecte
+        waitMaxMs = 0;
         break;
       }
 
@@ -1432,7 +1448,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
     // ─── Calidad de re-encode ────────────────────────────────────
     const channelData = await this.prisma.channel.findUnique({
-      where: { id: session.channelId },
+      where:  { id: session.channelId },
       select: { videoQuality: true },
     });
     const qKey    = channelData?.videoQuality ?? '480p';
@@ -1442,7 +1458,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     const normalizeVf = `scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,fps=25,format=yuv420p`;
     const audioFilter = 'aformat=channel_layouts=stereo,aresample=async=1000';
 
-    const args: string[] = [
+    const ffmpegArgs: string[] = [
       '-loglevel', 'warning',
       ...inputArgs,
       '-vf', normalizeVf,
@@ -1456,21 +1472,55 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       ...hlsArgs,
     ];
 
-    if (session.stopping || !session.activeIngestId) return;
+    if (session.stopping || !session.activeIngestId) {
+      if (ytDlpProc) { try { ytDlpProc.kill('SIGTERM'); } catch { /* ok */ } session.ytDlpProcess = null; }
+      return;
+    }
 
     // Token para waitForM3u8
     session.pollToken++;
     const myPollToken = session.pollToken;
 
-    const proc = spawn('ffmpeg', args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
+    // stdin: 'pipe' si leemos de yt-dlp, 'ignore' si no
+    const proc = spawn('ffmpeg', ffmpegArgs, {
+      stdio: [ytDlpProc ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       cwd:   session.hlsDir,
     });
     session.ingestProcess = proc;
 
+    // ─── Conectar pipe yt-dlp → FFmpeg stdin ────────────────────
+    if (ytDlpProc) {
+      (ytDlpProc.stdout as NodeJS.ReadableStream).pipe(proc.stdin as NodeJS.WritableStream);
+
+      ytDlpProc.stderr.on('data', (chunk: Buffer) => {
+        chunk.toString().split('\n').forEach(l => {
+          const t = l.trim();
+          if (t) this.log(session, `yt-dlp: ${t}`);
+        });
+      });
+
+      ytDlpProc.on('error', (err: any) => {
+        session.ytDlpProcess = null;
+        const msg = err.code === 'ENOENT'
+          ? 'yt-dlp no está instalado — reconstruí el container con Deploy (no solo Restart)'
+          : `yt-dlp spawn error: ${err.message}`;
+        this.log(session, `INGEST ERROR: ${msg}`);
+      });
+
+      ytDlpProc.on('close', (code, sig) => {
+        session.ytDlpProcess = null;
+        // yt-dlp terminó — FFmpeg leerá EOF en stdin y también terminará
+        if (code !== 0 && sig !== 'SIGTERM') {
+          this.log(session, `yt-dlp terminó con error (code=${code}) — revisá la URL y los permisos de YouTube`);
+        }
+      });
+    }
+
     if (session.stopping || !session.activeIngestId) {
+      if (ytDlpProc && !ytDlpProc.killed) { try { ytDlpProc.kill('SIGTERM'); } catch { /* ok */ } }
       try { proc.kill('SIGTERM'); } catch { /* ok */ }
       session.ingestProcess = null;
+      session.ytDlpProcess  = null;
       return;
     }
 
@@ -1485,7 +1535,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
     proc.on('spawn', () => {
       spawnedAt = Date.now();
-      this.log(session, `FFmpeg INGEST PID=${proc.pid}. Esperando segmentos HLS...`);
+      this.log(session, `FFmpeg INGEST PID=${proc.pid}${ytDlpProc ? ` ← yt-dlp PID=${ytDlpProc.pid}` : ''}. Esperando segmentos HLS...`);
       this.waitForM3u8(session, m3u8Path, myPollToken, waitMaxMs);
     });
 
@@ -1494,12 +1544,17 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       this.log(session, `FFmpeg INGEST terminó (code=${code} sig=${sig} uptime=${uptime}ms)`);
       session.ingestProcess = null;
 
-      if (session.stopping) return;
-      // activeIngestId === null → deactivateIngest() ya lo limpió; launchFfmpeg ya fue llamado
-      if (!session.activeIngestId) return;
+      // Matar yt-dlp si todavía corre
+      if (session.ytDlpProcess && !session.ytDlpProcess.killed) {
+        try { session.ytDlpProcess.kill('SIGTERM'); } catch { /* ok */ }
+      }
+      session.ytDlpProcess = null;
 
-      // Terminación inesperada — marcar ERROR y retomar programación
-      this.log(session, `INGEST: Fuente terminó inesperadamente → retomando programación normal`);
+      if (session.stopping) return;
+      if (!session.activeIngestId) return; // deactivateIngest() ya limpió y llamó launchFfmpeg
+
+      // Terminación inesperada
+      this.log(session, 'INGEST: Fuente terminó inesperadamente → retomando programación normal');
       const ingestId = session.activeIngestId;
       session.activeIngestId = null;
 
@@ -1524,28 +1579,6 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           setTimeout(() => this.launchFfmpeg(session), 2_000);
         }
       }
-    });
-  }
-
-  /**
-   * Extrae la URL directa de una señal YouTube/Live usando yt-dlp.
-   * Requiere yt-dlp instalado en el contenedor.
-   * Retorna null si yt-dlp no está disponible o la URL es inválida.
-   */
-  private async extractYouTubeUrl(url: string): Promise<string | null> {
-    return new Promise((resolve) => {
-      const proc = spawn(
-        'yt-dlp',
-        ['-f', 'best[height<=720]/best', '--no-playlist', '-g', url],
-        { stdio: ['ignore', 'pipe', 'pipe'] },
-      );
-      let output = '';
-      proc.stdout.on('data', (chunk: Buffer) => { output += chunk.toString(); });
-      proc.on('close', (code) => {
-        const directUrl = output.trim().split('\n')[0] ?? '';
-        resolve(code === 0 && directUrl ? directUrl : null);
-      });
-      proc.on('error', () => resolve(null)); // ENOENT si yt-dlp no está instalado
     });
   }
 
