@@ -1397,12 +1397,26 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       // yt-dlp escribe el stream a su stdout; FFmpeg lo lee desde stdin (pipe:0).
       case 'YOUTUBE': {
         this.log(session, 'INGEST: Iniciando yt-dlp → FFmpeg pipe para YouTube Live...');
-        ytDlpProc = spawn('yt-dlp', [
+        const ytArgs: string[] = [
           '--no-playlist',
+          // Usa Node.js (ya en el container) como JS runtime en lugar de deno
+          '--js-runtimes', 'node',
+          // TV embedded + web client: suele evadir la detección de bots en IPs de servidor
+          '--extractor-args', 'youtube:player_client=tv_embedded,web',
+          // Sin cache de archivos para evitar datos corruptos entre reinicios
+          '--no-cache-dir',
           '-f', 'best[height<=720]/best',
-          '-o', '-',          // stream a stdout
-          source.url,
-        ], { stdio: ['ignore', 'pipe', 'pipe'] });
+          '-o', '-',          // stream a stdout (pipe → FFmpeg stdin)
+        ];
+        // Soporte opcional de cookies: definir YTDLP_COOKIES_FILE en las env vars del servicio.
+        // Exportar cookies de YouTube con una cuenta real elimina por completo el bot detection.
+        const cookiesFile = this.config.get<string>('YTDLP_COOKIES_FILE', '');
+        if (cookiesFile) {
+          ytArgs.push('--cookies', cookiesFile);
+          this.log(session, `INGEST: yt-dlp usando cookies desde ${cookiesFile}`);
+        }
+        ytArgs.push(source.url as string);
+        ytDlpProc = spawn('yt-dlp', ytArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
         session.ytDlpProcess = ytDlpProc;
         inputArgs = ['-i', 'pipe:0']; // FFmpeg leerá desde stdin
         break;
