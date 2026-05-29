@@ -95,6 +95,7 @@ model Video {
   fileSize      BigInt      @map("file_size")
   mimeType      String      @map("mime_type")
   tags          String[]    @default([])
+  folder        String?     // Carpeta organizativa (solo filtrado en frontend)
   createdAt     DateTime    @default(now()) @map("created_at")
   updatedAt     DateTime    @updatedAt @map("updated_at")
 
@@ -130,7 +131,7 @@ model PlaylistItem {
   playlistId String   @map("playlist_id")
   playlist   Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
   videoId    String   @map("video_id")
-  video      Video    @relation(fields: [videoId], references: [id])
+  video      Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
   order      Int
   trimStart  Float?   @map("trim_start")
   trimEnd    Float?   @map("trim_end")
@@ -228,7 +229,7 @@ model AdSpot {
   adBlockId  String   @map("ad_block_id")
   adBlock    AdBlock  @relation(fields: [adBlockId], references: [id], onDelete: Cascade)
   videoId    String   @map("video_id")
-  video      Video    @relation(fields: [videoId], references: [id])
+  video      Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
   name       String
   advertiser String
   weight     Int      @default(1)
@@ -247,7 +248,7 @@ model CuePoint {
   channelId  String       @map("channel_id")
   channel    Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
   videoId    String       @map("video_id")
-  video      Video        @relation(fields: [videoId], references: [id])
+  video      Video        @relation(fields: [videoId], references: [id], onDelete: Cascade)
   adBlockId  String       @map("ad_block_id")
   adBlock    AdBlock      @relation(fields: [adBlockId], references: [id], onDelete: Cascade)
   type       CuePointType

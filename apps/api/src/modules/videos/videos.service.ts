@@ -63,6 +63,7 @@ export class VideosService {
         originalKey: '', // Se actualiza al completar
         fileSize: BigInt(dto.fileSize),
         mimeType: dto.mimeType,
+        folder: dto.folder ?? null,
       },
     });
 
@@ -207,6 +208,7 @@ export class VideosService {
         fileSize: true,
         mimeType: true,
         tags: true,
+        folder: true,
         createdAt: true,
         updatedAt: true,
       },

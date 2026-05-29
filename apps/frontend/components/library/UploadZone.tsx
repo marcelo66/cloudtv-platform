@@ -24,10 +24,11 @@ interface UploadItem {
 
 interface UploadZoneProps {
   channelId: string;
+  folder?: string;
   onUploadComplete?: (videoId: string) => void;
 }
 
-export function UploadZone({ channelId, onUploadComplete }: UploadZoneProps) {
+export function UploadZone({ channelId, folder, onUploadComplete }: UploadZoneProps) {
   const inputId = useId();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -73,12 +74,16 @@ export function UploadZone({ channelId, onUploadComplete }: UploadZoneProps) {
       setQueue((prev) => [...prev, item]);
 
       try {
-        await uploadVideo(file, channelId, {
-          signal: abortController.signal,
-          onStatusChange: (status) => updateItem(itemId, { status }),
-          onProgress: ({ percent }) =>
-            updateItem(itemId, { progress: percent }),
-        });
+        await uploadVideo(
+          file,
+          channelId,
+          {
+            signal: abortController.signal,
+            onStatusChange: (status) => updateItem(itemId, { status }),
+            onProgress: ({ percent }) => updateItem(itemId, { progress: percent }),
+          },
+          folder,
+        );
 
         updateItem(itemId, { status: 'done', progress: 100 });
         onUploadComplete?.(itemId);
@@ -94,7 +99,7 @@ export function UploadZone({ channelId, onUploadComplete }: UploadZoneProps) {
         }
       }
     },
-    [channelId, onUploadComplete, updateItem],
+    [channelId, folder, onUploadComplete, updateItem],
   );
 
   const handleFiles = useCallback(

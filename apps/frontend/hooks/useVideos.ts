@@ -17,6 +17,7 @@ export interface Video {
   fileSize: string;
   mimeType: string;
   tags: string[];
+  folder?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -51,7 +52,7 @@ export function useUpdateVideo() {
       data,
     }: {
       videoId: string;
-      data: { title?: string; description?: string; tags?: string[] };
+      data: { title?: string; description?: string; tags?: string[]; folder?: string | null };
     }) => apiClient.patch(`/videos/${videoId}`, data),
 
     onSuccess: () => {

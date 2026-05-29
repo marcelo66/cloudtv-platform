@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import Image from 'next/image';
-import { MoreHorizontal, Pencil, Trash2, Film, Check, X } from 'lucide-react';
+import { MoreHorizontal, Pencil, Trash2, Film, Check, X, Folder, FolderInput } from 'lucide-react';
 import { Video } from '@/hooks/useVideos';
 import { VideoStatusBadge } from './VideoStatusBadge';
 import { formatDuration, formatBytes } from '@/lib/utils';
@@ -10,14 +10,17 @@ import { cn } from '@/lib/utils';
 
 interface VideoCardProps {
   video: Video;
-  onUpdate: (id: string, data: { title: string }) => void;
+  folders?: string[]; // carpetas existentes para el selector
+  onUpdate: (id: string, data: { title?: string; folder?: string | null }) => void;
   onDelete: (id: string) => void;
 }
 
-export function VideoCard({ video, onUpdate, onDelete }: VideoCardProps) {
+export function VideoCard({ video, folders = [], onUpdate, onDelete }: VideoCardProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editTitle, setEditTitle] = useState(video.title);
+  const [editingFolder, setEditingFolder] = useState(false);
+  const [folderInput, setFolderInput] = useState(video.folder ?? '');
 
   const handleSaveTitle = () => {
     if (editTitle.trim() && editTitle !== video.title) {
@@ -26,16 +29,25 @@ export function VideoCard({ video, onUpdate, onDelete }: VideoCardProps) {
     setEditing(false);
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') handleSaveTitle();
-    if (e.key === 'Escape') {
-      setEditTitle(video.title);
-      setEditing(false);
+  const handleSaveFolder = () => {
+    const newFolder = folderInput.trim() || null;
+    if (newFolder !== (video.folder ?? null)) {
+      onUpdate(video.id, { folder: newFolder });
     }
+    setEditingFolder(false);
   };
 
-  const isProcessing =
-    video.status === 'PROCESSING' || video.status === 'PENDING';
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') handleSaveTitle();
+    if (e.key === 'Escape') { setEditTitle(video.title); setEditing(false); }
+  };
+
+  const handleFolderKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') handleSaveFolder();
+    if (e.key === 'Escape') { setFolderInput(video.folder ?? ''); setEditingFolder(false); }
+  };
+
+  const isProcessing = video.status === 'PROCESSING' || video.status === 'PENDING';
 
   return (
     <div className="group glass-card hover:border-white/10 transition-all duration-200">
@@ -67,6 +79,14 @@ export function VideoCard({ video, onUpdate, onDelete }: VideoCardProps) {
           </div>
         )}
 
+        {/* Folder badge en thumbnail */}
+        {video.folder && (
+          <div className="absolute top-2 left-2 flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-sm text-[10px] text-slate-300 font-medium">
+            <Folder className="w-2.5 h-2.5 text-brand-400" />
+            <span className="truncate max-w-[80px]">{video.folder}</span>
+          </div>
+        )}
+
         {/* Processing overlay */}
         {isProcessing && (
           <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
@@ -89,19 +109,10 @@ export function VideoCard({ video, onUpdate, onDelete }: VideoCardProps) {
                 onBlur={handleSaveTitle}
                 className="flex-1 text-sm font-medium bg-surface-600 border border-brand-500/50 rounded px-2 py-0.5 text-white focus:outline-none"
               />
-              <button
-                onClick={handleSaveTitle}
-                className="text-green-400 hover:text-green-300 p-0.5"
-              >
+              <button onClick={handleSaveTitle} className="text-green-400 hover:text-green-300 p-0.5">
                 <Check className="w-3.5 h-3.5" />
               </button>
-              <button
-                onClick={() => {
-                  setEditTitle(video.title);
-                  setEditing(false);
-                }}
-                className="text-slate-500 hover:text-slate-300 p-0.5"
-              >
+              <button onClick={() => { setEditTitle(video.title); setEditing(false); }} className="text-slate-500 hover:text-slate-300 p-0.5">
                 <X className="w-3.5 h-3.5" />
               </button>
             </div>
@@ -126,16 +137,10 @@ export function VideoCard({ video, onUpdate, onDelete }: VideoCardProps) {
 
             {menuOpen && (
               <>
-                <div
-                  className="fixed inset-0 z-10"
-                  onClick={() => setMenuOpen(false)}
-                />
-                <div className="absolute right-0 top-7 z-20 w-36 rounded-lg border border-white/10 bg-surface-600 shadow-xl overflow-hidden">
+                <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
+                <div className="absolute right-0 top-7 z-20 w-40 rounded-lg border border-white/10 bg-surface-600 shadow-xl overflow-hidden">
                   <button
-                    onClick={() => {
-                      setEditing(true);
-                      setMenuOpen(false);
-                    }}
+                    onClick={() => { setEditing(true); setMenuOpen(false); }}
                     className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-300 hover:bg-white/5 hover:text-white transition-colors"
                   >
                     <Pencil className="w-3.5 h-3.5" />
@@ -143,9 +148,17 @@ export function VideoCard({ video, onUpdate, onDelete }: VideoCardProps) {
                   </button>
                   <button
                     onClick={() => {
-                      onDelete(video.id);
+                      setFolderInput(video.folder ?? '');
+                      setEditingFolder(true);
                       setMenuOpen(false);
                     }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-300 hover:bg-white/5 hover:text-white transition-colors"
+                  >
+                    <FolderInput className="w-3.5 h-3.5" />
+                    Mover a carpeta
+                  </button>
+                  <button
+                    onClick={() => { onDelete(video.id); setMenuOpen(false); }}
                     className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 transition-colors"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
@@ -157,13 +170,47 @@ export function VideoCard({ video, onUpdate, onDelete }: VideoCardProps) {
           </div>
         </div>
 
+        {/* Folder editor inline */}
+        {editingFolder && (
+          <div className="mb-2">
+            <div className="flex gap-1">
+              <select
+                autoFocus
+                value={folders.includes(folderInput) ? folderInput : (folderInput ? '__custom__' : '')}
+                onChange={(e) => {
+                  if (e.target.value !== '__custom__') setFolderInput(e.target.value);
+                }}
+                className="flex-1 px-2 py-1 rounded text-xs bg-surface-600 border border-brand-500/50 text-white focus:outline-none"
+              >
+                <option value="">— Sin carpeta —</option>
+                {folders.map((f) => <option key={f} value={f}>{f}</option>)}
+                <option value="__custom__">✏ Escribir nombre...</option>
+              </select>
+              <button onClick={handleSaveFolder} className="text-green-400 hover:text-green-300 p-1 flex-shrink-0">
+                <Check className="w-3.5 h-3.5" />
+              </button>
+              <button onClick={() => setEditingFolder(false)} className="text-slate-500 hover:text-slate-300 p-1 flex-shrink-0">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            {(!folders.includes(folderInput) && folderInput) || !folders.length ? (
+              <input
+                value={folderInput}
+                onChange={(e) => setFolderInput(e.target.value)}
+                onKeyDown={handleFolderKeyDown}
+                placeholder="Nombre de carpeta"
+                maxLength={100}
+                className="mt-1 w-full px-2 py-1 rounded text-xs bg-surface-600 border border-brand-500/50 text-white placeholder-slate-600 focus:outline-none"
+              />
+            ) : null}
+          </div>
+        )}
+
         {/* Meta row */}
         <div className="flex items-center justify-between">
           <VideoStatusBadge status={video.status} />
           <div className="flex items-center gap-2 text-xs text-slate-600">
-            {video.width && video.height && (
-              <span>{video.height}p</span>
-            )}
+            {video.width && video.height && <span>{video.height}p</span>}
             <span>{formatBytes(Number(video.fileSize))}</span>
           </div>
         </div>

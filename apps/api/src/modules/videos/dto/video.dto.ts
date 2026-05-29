@@ -31,6 +31,12 @@ export class InitiateUploadDto {
   @IsString()
   @IsNotEmpty()
   channelId: string;
+
+  @ApiPropertyOptional({ example: 'Noticias', description: 'Carpeta organizativa opcional' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  folder?: string;
 }
 
 export class UploadPartDto {
@@ -92,4 +98,10 @@ export class UpdateVideoDto {
   @IsOptional()
   @IsArray()
   tags?: string[];
+
+  @ApiPropertyOptional({ example: 'Deportes', description: 'Carpeta organizativa (null para quitar)' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  folder?: string | null;
 }
