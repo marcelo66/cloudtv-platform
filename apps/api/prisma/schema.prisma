@@ -22,10 +22,29 @@ model User {
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
-  channels      Channel[]
-  refreshTokens RefreshToken[]
+  channels           Channel[]
+  refreshTokens      RefreshToken[]
+  youtubeCredential  YoutubeCredential?
 
   @@map("users")
+}
+
+// ─── YOUTUBE AUTH ─────────────────────────────────────────────
+// Credenciales OAuth2 de YouTube obtenidas vía Device Authorization Flow.
+// Almacena el contenido del directorio youtube-oauth2 del caché de yt-dlp
+// como JSON { [filename]: contenido } para sobrevivir reinicios del container.
+
+model YoutubeCredential {
+  id           String   @id @default(cuid())
+  userId       String   @unique @map("user_id")
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // { [filename.json]: contenido } del dir youtube-oauth2 de yt-dlp
+  tokenJson    String   @map("token_json")
+  accountEmail String?  @map("account_email")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("youtube_credentials")
 }
 
 model RefreshToken {

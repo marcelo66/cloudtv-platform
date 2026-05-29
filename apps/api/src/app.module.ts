@@ -18,6 +18,7 @@ import { CuePointsModule } from './modules/cue-points/cue-points.module';
 import { AdReportsModule } from './modules/ad-reports/ad-reports.module';
 import { ZeroTierModule } from './modules/zerotier/zerotier.module';
 import { IngestModule } from './modules/ingest/ingest.module';
+import { YoutubeAuthModule } from './modules/youtube-auth/youtube-auth.module';
 
 @Module({
   imports: [
@@ -62,6 +63,7 @@ import { IngestModule } from './modules/ingest/ingest.module';
     AdReportsModule,
     ZeroTierModule,
     IngestModule,
+    YoutubeAuthModule,
     WorkerModule,
   ],
 })

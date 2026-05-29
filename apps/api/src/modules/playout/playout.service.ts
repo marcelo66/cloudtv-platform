@@ -17,6 +17,7 @@ import { StorageService } from '../storage/storage.service';
 import { OverlaysService } from '../overlays/overlays.service';
 import { StreamOutputsService } from '../stream-outputs/stream-outputs.service';
 import { AdBlocksService, AdBlockForPlayout, CuePointForPlayout, AdSpotWithVideo } from '../ad-blocks/ad-blocks.service';
+import { YoutubeAuthService } from '../youtube-auth/youtube-auth.service';
 
 interface PlayoutSession {
   channelId: string;
@@ -88,6 +89,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     private overlaysService: OverlaysService,
     private streamOutputsService: StreamOutputsService,
     private adBlocksService: AdBlocksService,
+    private youtubeAuthService: YoutubeAuthService,
   ) {}
 
   // ─── Lifecycle ────────────────────────────────────────────────
@@ -1389,6 +1391,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     let inputArgs: string[] = [];
     let waitMaxMs: number | undefined;
     let ytDlpProc: ChildProcess | null = null; // solo para YOUTUBE
+    // Para persistir el token OAuth2 renovado tras la transmisión
+    let ytDlpOauthUserId: string | null  = null;
+    let ytDlpOauthCacheDir: string | null = null;
 
     switch (source.type as string) {
 
@@ -1397,42 +1402,60 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       // yt-dlp escribe el stream a su stdout; FFmpeg lo lee desde stdin (pipe:0).
       case 'YOUTUBE': {
         this.log(session, 'INGEST: Iniciando yt-dlp → FFmpeg pipe para YouTube Live...');
+
+        // Buscar credenciales OAuth2 del propietario del canal
+        const channelOwner = await this.prisma.channel.findUnique({
+          where:  { id: session.channelId },
+          select: { userId: true },
+        });
+        const userId  = channelOwner?.userId ?? null;
+        let cacheDir: string | null = null;
+
+        if (userId) {
+          cacheDir = await this.youtubeAuthService.prepareCredentials(userId);
+        }
+
         const ytArgs: string[] = [
           '--no-playlist',
-          // Node.js como JS runtime para generar po_tokens (auto-generados con node)
+          // Node.js como JS runtime para generar po_tokens
           '--js-runtimes', 'node',
-          // Cliente iOS: el más confiable en IPs de datacenter sin cookies.
-          // tv_embedded fue removido en versiones recientes de yt-dlp.
-          '--extractor-args', 'youtube:player_client=ios,web',
-          '--no-cache-dir',
           '-f', 'best[height<=720]/best',
           '-o', '-',
         ];
 
-        // ── Cookies (solución definitiva al bot-detection) ────────────
-        // Opción A: ruta directa a un archivo cookies.txt en el container
-        const cookiesFile = this.config.get<string>('YTDLP_COOKIES_FILE', '');
-        // Opción B: contenido de cookies.txt codificado en base64
-        //   → Genera con: base64 -w0 cookies.txt   (Linux/Mac)
-        //                 [Convert]::ToBase64String([IO.File]::ReadAllBytes('cookies.txt'))  (PowerShell)
-        //   → Pega el resultado en EasyPanel → Variables → YTDLP_COOKIES_B64
-        const cookiesB64  = this.config.get<string>('YTDLP_COOKIES_B64', '');
-
-        if (cookiesFile) {
-          ytArgs.push('--cookies', cookiesFile);
-          this.log(session, `INGEST: yt-dlp usando cookies desde ${cookiesFile}`);
-        } else if (cookiesB64) {
-          // Decodificar base64 y escribir en /tmp en cada activación
-          const tmpCookies = '/tmp/yt-dlp-cookies.txt';
-          try {
-            await fs.writeFile(tmpCookies, Buffer.from(cookiesB64, 'base64'));
-            ytArgs.push('--cookies', tmpCookies);
-            this.log(session, 'INGEST: yt-dlp usando cookies (YTDLP_COOKIES_B64 → /tmp/yt-dlp-cookies.txt)');
-          } catch (e: any) {
-            this.log(session, `INGEST: WARN no se pudo escribir cookies temp: ${e.message}`);
-          }
+        if (cacheDir) {
+          // ── OAuth2 autenticado (Device Flow) ──────────────────────
+          // yt-dlp usa el token del cache dir automáticamente y lo renueva
+          // con el refresh_token sin pedir nuevo login al usuario.
+          ytArgs.push('--username', 'oauth');
+          ytArgs.push('--password', '');
+          ytArgs.push('--cache-dir', cacheDir);
+          ytDlpOauthUserId   = userId;
+          ytDlpOauthCacheDir = cacheDir;
+          this.log(session, `INGEST: OAuth2 YouTube activo (usuario ${userId}) — sin bot-detection`);
         } else {
-          this.log(session, 'INGEST: Sin cookies configuradas — bot-detection probable en IPs de servidor');
+          // ── Sin autenticación — fallback por compatibilidad ───────
+          // Funcionará solo si YouTube no exige login para la IP del servidor.
+          ytArgs.push('--extractor-args', 'youtube:player_client=ios,web');
+          ytArgs.push('--no-cache-dir');
+          // Soporte legacy: cookies.txt via env var
+          const cookiesFile = this.config.get<string>('YTDLP_COOKIES_FILE', '');
+          const cookiesB64  = this.config.get<string>('YTDLP_COOKIES_B64', '');
+          if (cookiesFile) {
+            ytArgs.push('--cookies', cookiesFile);
+            this.log(session, `INGEST: yt-dlp usando cookies desde ${cookiesFile}`);
+          } else if (cookiesB64) {
+            const tmpCookies = '/tmp/yt-dlp-cookies.txt';
+            try {
+              await fs.writeFile(tmpCookies, Buffer.from(cookiesB64, 'base64'));
+              ytArgs.push('--cookies', tmpCookies);
+              this.log(session, 'INGEST: yt-dlp usando cookies (YTDLP_COOKIES_B64)');
+            } catch (e: any) {
+              this.log(session, `INGEST: WARN no se pudo escribir cookies temp: ${e.message}`);
+            }
+          } else {
+            this.log(session, 'INGEST: ⚠ Sin OAuth2 ni cookies — conectá tu cuenta YouTube en Ingesta → Autenticación');
+          }
         }
 
         ytArgs.push(source.url as string);
@@ -1546,6 +1569,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         // yt-dlp terminó — FFmpeg leerá EOF en stdin y también terminará
         if (code !== 0 && sig !== 'SIGTERM') {
           this.log(session, `yt-dlp terminó con error (code=${code}) — revisá la URL y los permisos de YouTube`);
+        }
+        // Si teníamos OAuth2, persistir el token renovado en DB
+        if (ytDlpOauthUserId) {
+          this.youtubeAuthService.persistRefreshedToken(ytDlpOauthUserId).catch(() => {});
         }
       });
     }

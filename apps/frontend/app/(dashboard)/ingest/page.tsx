@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Radio,
   Plus,
@@ -16,6 +16,11 @@ import {
   Wifi,
   AlertCircle,
   Loader2,
+  Youtube,
+  ExternalLink,
+  LogOut,
+  CheckCircle2,
+  XCircle,
 } from 'lucide-react';
 import { Header } from '@/components/dashboard/Header';
 import apiClient from '@/lib/api-client';
@@ -35,6 +40,13 @@ import {
   type CreateIngestInput,
   type UpdateIngestInput,
 } from '@/hooks/useIngest';
+import {
+  useYoutubeAuthStatus,
+  useYoutubeStartFlow,
+  useYoutubeDevicePoll,
+  useYoutubeDisconnect,
+  type DeviceFlowSession,
+} from '@/hooks/useYoutubeAuth';
 
 // ─── Helpers ──────────────────────────────────────────────────
 
@@ -53,6 +65,267 @@ function CopyBtn({ text }: { text: string }) {
     >
       {copied ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3.5 h-3.5" />}
     </button>
+  );
+}
+
+// ─── Device Flow Modal ────────────────────────────────────────
+
+interface DeviceFlowModalProps {
+  session: DeviceFlowSession;
+  onClose: () => void;
+  onSuccess: () => void;
+}
+
+function DeviceFlowModal({ session, onClose, onSuccess }: DeviceFlowModalProps) {
+  const [copied, setCopied] = useState(false);
+  const { data: pollData } = useYoutubeDevicePoll(session.sessionId);
+  const calledSuccess = useRef(false);
+
+  // Detectar autorización exitosa
+  useEffect(() => {
+    if (pollData?.status === 'authorized' && !calledSuccess.current) {
+      calledSuccess.current = true;
+      setTimeout(onSuccess, 1800); // pequeño delay para mostrar el tick
+    }
+  }, [pollData?.status, onSuccess]);
+
+  const authorized = pollData?.status === 'authorized';
+  const hasError   = pollData?.status === 'error';
+
+  const copyCode = () => {
+    navigator.clipboard.writeText(session.userCode).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+      <div className="w-full max-w-md bg-surface-800 rounded-2xl border border-white/10 shadow-2xl">
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-red-500/15 flex items-center justify-center">
+              <Youtube className="w-4 h-4 text-red-400" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-white">Conectar cuenta de YouTube</p>
+              <p className="text-xs text-slate-400">Autorización en 3 pasos</p>
+            </div>
+          </div>
+          {!authorized && (
+            <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors">
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+
+        <div className="px-6 py-5 space-y-5">
+
+          {authorized ? (
+            /* ── Estado: autorizado ──────────────────────────────── */
+            <div className="flex flex-col items-center gap-3 py-4 text-center">
+              <div className="w-14 h-14 rounded-full bg-green-500/15 flex items-center justify-center">
+                <CheckCircle2 className="w-8 h-8 text-green-400" />
+              </div>
+              <div>
+                <p className="text-base font-semibold text-white">¡Cuenta conectada!</p>
+                <p className="text-sm text-slate-400 mt-1">
+                  Ahora podés usar fuentes YouTube sin restricciones de bot detection.
+                </p>
+              </div>
+            </div>
+          ) : hasError ? (
+            /* ── Estado: error ───────────────────────────────────── */
+            <div className="flex flex-col items-center gap-3 py-4 text-center">
+              <div className="w-14 h-14 rounded-full bg-red-500/15 flex items-center justify-center">
+                <XCircle className="w-8 h-8 text-red-400" />
+              </div>
+              <div>
+                <p className="text-base font-semibold text-white">Error en la autorización</p>
+                <p className="text-sm text-slate-400 mt-1">
+                  {pollData?.errorMessage ?? 'Ocurrió un error. Intentá de nuevo.'}
+                </p>
+              </div>
+              <button
+                onClick={onClose}
+                className="px-4 py-2 rounded-xl bg-surface-600 hover:bg-surface-500 text-sm font-medium text-white transition-colors"
+              >
+                Cerrar
+              </button>
+            </div>
+          ) : (
+            /* ── Estado: pendiente ───────────────────────────────── */
+            <>
+              {/* Paso 1 */}
+              <div className="flex gap-3">
+                <div className="flex-shrink-0 w-6 h-6 rounded-full bg-brand-600 flex items-center justify-center text-xs font-bold text-white">1</div>
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-white mb-1.5">Abrir la página de activación</p>
+                  <a
+                    href={session.authUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-sm font-medium text-white transition-colors"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    Abrir {session.authUrl.replace('https://', '')}
+                  </a>
+                  <p className="text-xs text-slate-500 mt-1">O copiá la URL: <span className="text-slate-400 font-mono">{session.authUrl}</span></p>
+                </div>
+              </div>
+
+              {/* Paso 2 */}
+              <div className="flex gap-3">
+                <div className="flex-shrink-0 w-6 h-6 rounded-full bg-brand-600 flex items-center justify-center text-xs font-bold text-white">2</div>
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-white mb-1.5">Ingresar este código</p>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 bg-surface-700 border border-surface-500 rounded-xl px-4 py-2.5 font-mono text-xl font-bold text-white tracking-widest text-center">
+                      {session.userCode}
+                    </div>
+                    <button
+                      onClick={copyCode}
+                      className="p-2.5 rounded-xl bg-surface-700 border border-surface-500 hover:bg-surface-600 text-slate-300 hover:text-white transition-colors"
+                      title="Copiar código"
+                    >
+                      {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Paso 3 */}
+              <div className="flex gap-3">
+                <div className="flex-shrink-0 w-6 h-6 rounded-full bg-brand-600 flex items-center justify-center text-xs font-bold text-white">3</div>
+                <div>
+                  <p className="text-sm font-medium text-white">Seleccionar tu cuenta de Google y autorizar</p>
+                  <p className="text-xs text-slate-500 mt-0.5">La ventana se cerrará automáticamente al completar.</p>
+                </div>
+              </div>
+
+              {/* Spinner de espera */}
+              <div className="flex items-center justify-center gap-2 pt-1 text-slate-400">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span className="text-sm">Esperando autorización...</span>
+              </div>
+
+              <div className="flex justify-end pt-1">
+                <button
+                  onClick={onClose}
+                  className="px-4 py-2 rounded-xl text-sm font-medium text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
+                >
+                  Cancelar
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── YouTube Connect Card ─────────────────────────────────────
+
+function YoutubeConnectCard() {
+  const { data: authStatus, isLoading, refetch } = useYoutubeAuthStatus();
+  const startFlow   = useYoutubeStartFlow();
+  const disconnect  = useYoutubeDisconnect();
+  const [flowSession, setFlowSession] = useState<DeviceFlowSession | null>(null);
+
+  const handleConnect = async () => {
+    try {
+      const session = await startFlow.mutateAsync();
+      setFlowSession(session);
+    } catch { /* toast shown by mutation */ }
+  };
+
+  const handleSuccess = () => {
+    setFlowSession(null);
+    refetch();
+    toast.success('¡Cuenta de YouTube conectada! Las fuentes YouTube ya no necesitan cookies.');
+  };
+
+  return (
+    <>
+      <div className={cn(
+        'rounded-2xl border p-4 transition-all',
+        authStatus?.connected
+          ? 'bg-green-500/5 border-green-500/20'
+          : 'bg-red-500/5 border-red-500/20',
+      )}>
+        <div className="flex items-center gap-4">
+          {/* Icono */}
+          <div className={cn(
+            'flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center',
+            authStatus?.connected ? 'bg-green-500/15' : 'bg-red-500/15',
+          )}>
+            <Youtube className={cn('w-5 h-5', authStatus?.connected ? 'text-green-400' : 'text-red-400')} />
+          </div>
+
+          {/* Info */}
+          <div className="flex-1 min-w-0">
+            {isLoading ? (
+              <div className="flex items-center gap-2 text-slate-400">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <span className="text-sm">Verificando...</span>
+              </div>
+            ) : authStatus?.connected ? (
+              <>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-green-400" />
+                  <p className="text-sm font-semibold text-green-300">Cuenta de YouTube conectada</p>
+                </div>
+                <p className="text-xs text-green-400/70 mt-0.5">
+                  {authStatus.email ?? 'Cuenta Google autorizada'} · Las fuentes YouTube usan OAuth2 (sin bot detection)
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-sm font-semibold text-red-300">Sin cuenta de YouTube conectada</p>
+                <p className="text-xs text-red-400/70 mt-0.5">
+                  Las fuentes YouTube pueden fallar por bot detection en IPs de servidor. Conectá tu cuenta para evitarlo.
+                </p>
+              </>
+            )}
+          </div>
+
+          {/* Acción */}
+          {!isLoading && (
+            authStatus?.connected ? (
+              <button
+                onClick={() => disconnect.mutate()}
+                disabled={disconnect.isPending}
+                className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-700 hover:bg-surface-600 text-slate-300 hover:text-white text-xs font-medium transition-colors disabled:opacity-50"
+              >
+                {disconnect.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <LogOut className="w-3.5 h-3.5" />}
+                Desconectar
+              </button>
+            ) : (
+              <button
+                onClick={handleConnect}
+                disabled={startFlow.isPending}
+                className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-300 hover:text-red-200 text-xs font-semibold transition-colors disabled:opacity-50"
+              >
+                {startFlow.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Youtube className="w-3.5 h-3.5" />}
+                Conectar cuenta
+              </button>
+            )
+          )}
+        </div>
+      </div>
+
+      {/* Modal de Device Flow */}
+      {flowSession && (
+        <DeviceFlowModal
+          session={flowSession}
+          onClose={() => setFlowSession(null)}
+          onSuccess={handleSuccess}
+        />
+      )}
+    </>
   );
 }
 
@@ -191,7 +464,7 @@ function IngestFormModal({ channelId, editing, onClose }: ModalProps) {
                   className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
                 />
                 <p className="mt-1.5 text-xs text-slate-500">
-                  Requiere <code className="text-slate-300">yt-dlp</code> instalado en el servidor Docker.
+                  Recomendado: conectá tu cuenta de YouTube en la sección de autenticación para evitar bloqueos por bot detection.
                 </p>
               </div>
             )}
@@ -642,6 +915,9 @@ export default function IngestPage() {
             </p>
           </div>
         )}
+
+        {/* Autenticación YouTube */}
+        <YoutubeConnectCard />
 
         {/* Lista */}
         {isLoading ? (
