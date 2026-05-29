@@ -535,7 +535,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
     const hlsArgs = [
       '-f', 'hls',
-      '-hls_time', '4',
+      '-hls_time', '2',
       '-hls_list_size', '10',
       '-hls_flags', 'delete_segments+append_list+independent_segments+omit_endlist',
       '-hls_start_number_source', 'epoch',
@@ -554,7 +554,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     ];
 
     // Filtro de normalización para cuando no hay overlays (scale + fps + formato)
-    const normalizeVf = `scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,fps=25,format=yuv420p`;
+    // setpts=PTS-STARTPTS: normaliza timestamps al cruzar archivos en el concat demuxer
+    // eliminando saltos/freezes entre videos en la transición.
+    const normalizeVf = `scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,setpts=PTS-STARTPTS,fps=25,format=yuv420p`;
 
     // Filtro de audio: convierte cualquier layout (mono, 5.1, 7.1, etc.) a estéreo
     // y resamplea async para compensar gaps causados por paquetes corruptos descartados.
@@ -1530,7 +1532,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     const quality = VIDEO_QUALITY[qKey] ?? VIDEO_QUALITY['480p'];
     const scale   = quality.scale;
 
-    const normalizeVf = `scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,fps=25,format=yuv420p`;
+    // setpts=PTS-STARTPTS: normaliza timestamps al cruzar archivos en el concat demuxer
+    // eliminando saltos/freezes entre videos en la transición.
+    const normalizeVf = `scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,setpts=PTS-STARTPTS,fps=25,format=yuv420p`;
     const audioFilter = 'aformat=channel_layouts=stereo,aresample=async=1000';
 
     const ffmpegArgs: string[] = [

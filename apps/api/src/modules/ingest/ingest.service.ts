@@ -46,7 +46,10 @@ export class IngestService {
         srtPort:       dto.srtPort              ?? null,
         srtLatency:    dto.srtLatency           ?? null,
         srtPassphrase: dto.srtPassphrase        ?? null,
+        srtStreamId:   dto.srtStreamId          ?? null,
+        rtmpHost:      dto.rtmpHost?.trim()     ?? null,
         rtmpPort:      dto.rtmpPort             ?? null,
+        rtmpApp:       dto.rtmpApp?.trim()      ?? null,
         rtmpKey:       dto.rtmpKey              ?? null,
       },
     });
@@ -67,7 +70,10 @@ export class IngestService {
         ...(dto.srtPort       !== undefined && { srtPort:       dto.srtPort     }),
         ...(dto.srtLatency    !== undefined && { srtLatency:    dto.srtLatency  }),
         ...(dto.srtPassphrase !== undefined && { srtPassphrase: dto.srtPassphrase }),
+        ...(dto.srtStreamId   !== undefined && { srtStreamId:   dto.srtStreamId  }),
+        ...(dto.rtmpHost      !== undefined && { rtmpHost:      dto.rtmpHost?.trim() ?? null }),
         ...(dto.rtmpPort      !== undefined && { rtmpPort:      dto.rtmpPort    }),
+        ...(dto.rtmpApp       !== undefined && { rtmpApp:       dto.rtmpApp?.trim() ?? null }),
         ...(dto.rtmpKey       !== undefined && { rtmpKey:       dto.rtmpKey     }),
       },
     });
