@@ -17,6 +17,7 @@ import { AdBlocksModule } from './modules/ad-blocks/ad-blocks.module';
 import { CuePointsModule } from './modules/cue-points/cue-points.module';
 import { AdReportsModule } from './modules/ad-reports/ad-reports.module';
 import { ZeroTierModule } from './modules/zerotier/zerotier.module';
+import { IngestModule } from './modules/ingest/ingest.module';
 
 @Module({
   imports: [
@@ -60,6 +61,7 @@ import { ZeroTierModule } from './modules/zerotier/zerotier.module';
     CuePointsModule,
     AdReportsModule,
     ZeroTierModule,
+    IngestModule,
     WorkerModule,
   ],
 })

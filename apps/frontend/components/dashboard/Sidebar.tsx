@@ -15,6 +15,7 @@ import {
   LogOut,
   ChevronRight,
   Clapperboard,
+  Antenna,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth.store';
@@ -60,6 +61,11 @@ const navItems = [
     label: 'Publicidad',
     href: '/ads',
     icon: Clapperboard,
+  },
+  {
+    label: 'Ingesta',
+    href: '/ingest',
+    icon: Antenna,
   },
 ];
 

@@ -85,6 +85,32 @@ export class PlayoutController {
   }
 
   /**
+   * Activa una fuente de ingesta: interrumpe la playlist y emite la señal externa.
+   * Requiere que el canal esté activo.
+   */
+  @Post(':channelId/ingest/:ingestId/activate')
+  @UseGuards(JwtAuthGuard)
+  activateIngest(
+    @Param('channelId') channelId: string,
+    @Param('ingestId')  ingestId:  string,
+    @CurrentUser('id')  userId:    string,
+  ) {
+    return this.playoutService.activateIngest(channelId, ingestId, userId);
+  }
+
+  /**
+   * Desactiva la ingesta activa y retoma la programación normal del canal.
+   */
+  @Post(':channelId/ingest/deactivate')
+  @UseGuards(JwtAuthGuard)
+  deactivateIngest(
+    @Param('channelId') channelId: string,
+    @CurrentUser('id')  userId:    string,
+  ) {
+    return this.playoutService.deactivateIngest(channelId, userId);
+  }
+
+  /**
    * Sirve index.m3u8 y seg*.ts — PÚBLICO (el player HLS hace requests sin token).
    * Usa createReadStream para mayor compatibilidad con NestJS StreamableFile.
    */

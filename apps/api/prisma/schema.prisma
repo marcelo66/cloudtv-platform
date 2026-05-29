@@ -66,6 +66,7 @@ model Channel {
   overlays      Overlay[]
   schedules     Schedule[]
   outputs       StreamOutput[]
+  ingestSources IngestSource[]
   logs          PlayoutLog[]
   adBlocks      AdBlock[]
   cuePoints     CuePoint[]
@@ -203,6 +204,37 @@ model StreamOutput {
   updatedAt DateTime     @updatedAt @map("updated_at")
 
   @@map("stream_outputs")
+}
+
+// ─── INGEST SOURCES ──────────────────────────────────────────
+// Fuentes de ingesta: reemplazan la programación normal para transmitir
+// eventos en vivo (YouTube, SRT, RTMP entrante).
+
+model IngestSource {
+  id        String       @id @default(cuid())
+  channelId String       @map("channel_id")
+  channel   Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  name      String
+  type      IngestType
+  // Dependiendo del tipo:
+  //   YOUTUBE:      URL completa de YouTube Watch/Live
+  //   SRT_CALLER:   "host:port" al que conectarse (ej: "10.10.0.5:9002")
+  //   SRT_LISTENER: vacío — escucha en srtPort
+  //   RTMP_PUSH:    vacío — escucha en rtmpPort con rtmpKey
+  url           String   @default("")
+  // SRT
+  srtPort       Int?     @map("srt_port")
+  srtLatency    Int?     @map("srt_latency")
+  srtPassphrase String?  @map("srt_passphrase")
+  // RTMP Push entrante
+  rtmpPort      Int?     @map("rtmp_port")   // Puerto RTMP (default 1935)
+  rtmpKey       String?  @map("rtmp_key")    // Stream key del encoder
+  // Estado actual
+  status    IngestStatus @default(IDLE)
+  createdAt DateTime     @default(now()) @map("created_at")
+  updatedAt DateTime     @updatedAt @map("updated_at")
+
+  @@map("ingest_sources")
 }
 
 // ─── AD BREAKS (Tandas Publicitarias) ────────────────────────
@@ -347,6 +379,19 @@ enum OverlayType {
   TEXT_SCROLL
   CLOCK
   TICKER
+}
+
+enum IngestType {
+  YOUTUBE      // Fuente YouTube live (requiere yt-dlp instalado)
+  SRT_CALLER   // Conectarse a una fuente SRT remota (cliente con ZeroTier u otro)
+  SRT_LISTENER // Escuchar conexiones SRT entrantes en un puerto local
+  RTMP_PUSH    // Recibir RTMP push de un encoder (OBS, vMix, etc.)
+}
+
+enum IngestStatus {
+  IDLE    // No activo
+  ACTIVE  // El playout está usando esta fuente como señal en vivo
+  ERROR   // El proceso FFmpeg terminó con error
 }
 
 enum Platform {

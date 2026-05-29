@@ -4,6 +4,7 @@ import {
   OnModuleDestroy,
   OnModuleInit,
   NotFoundException,
+  BadRequestException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { VideoStatus, OverlayType, Platform } from '@prisma/client';
@@ -39,6 +40,11 @@ interface PlayoutSession {
   scheduleChangePending: boolean;
   /** Timer del watcher de schedule */
   scheduleWatchTimer: ReturnType<typeof setTimeout> | null;
+  // ─── Ingesta ──────────────────────────────────────────────────
+  /** ID de la fuente de ingesta activa (null = programación normal) */
+  activeIngestId: string | null;
+  /** Proceso FFmpeg de ingesta activo */
+  ingestProcess: ChildProcess | null;
 }
 
 const HLS_BASE    = path.join('/tmp', 'cloudtv-hls');
@@ -99,6 +105,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         where: { status: { not: 'IDLE' } },
         data: { status: 'IDLE' },
       });
+      // Resetear fuentes de ingesta activas (deploy anterior)
+      await this.prisma.ingestSource.updateMany({
+        where: { status: 'ACTIVE' },
+        data: { status: 'IDLE' },
+      });
     } catch (err) {
       this.logger.warn(`onModuleInit reset error: ${err.message}`);
     }
@@ -138,6 +149,8 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       activeScheduleId: null,
       scheduleChangePending: false,
       scheduleWatchTimer: null,
+      activeIngestId: null,
+      ingestProcess: null,
     };
     this.sessions.set(channelId, session);
 
@@ -170,11 +183,13 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     const s = this.sessions.get(channelId);
     if (!s) return null;
     return {
-      active: true,
-      startedAt: s.startedAt,
-      restarts: s.restarts,
-      pid: s.process?.pid ?? null,
-      rtmpOutputs: s.rtmpProcs.size,
+      active:         true,
+      startedAt:      s.startedAt,
+      restarts:       s.restarts,
+      pid:            s.process?.pid      ?? null,
+      rtmpOutputs:    s.rtmpProcs.size,
+      activeIngestId: s.activeIngestId    ?? null,
+      ingestPid:      s.ingestProcess?.pid ?? null,
     };
   }
 
@@ -193,6 +208,19 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       if (session.scheduleWatchTimer) {
         clearTimeout(session.scheduleWatchTimer);
         session.scheduleWatchTimer = null;
+      }
+      // Matar proceso de ingesta si existe
+      if (session.ingestProcess && !session.ingestProcess.killed) {
+        try { session.ingestProcess.kill('SIGTERM'); } catch { /* ok */ }
+      }
+      session.ingestProcess = null;
+      // Resetear fuente de ingesta activa
+      if (session.activeIngestId) {
+        this.prisma.ingestSource.update({
+          where: { id: session.activeIngestId },
+          data: { status: 'IDLE' },
+        }).catch(() => {});
+        session.activeIngestId = null;
       }
       // Matar proceso HLS principal
       this.killSession(session);
@@ -230,6 +258,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
   private async launchFfmpeg(session: PlayoutSession): Promise<void> {
     if (session.stopping) return;
+    if (session.activeIngestId) return; // ingesta activa — no reiniciar playlist
 
     // Cancelar cualquier waitForM3u8 anterior
     session.pollToken++;
@@ -576,9 +605,13 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       this.log(session, `[DIAG] filter_complex (${fc.length}ch): ${fc.length > 700 ? fc.substring(0, 700) + '...' : fc}`);
     }
 
-    // Verificar que no se haya pedido un stop mientras se descargaban videos / se construían overlays
+    // Verificar que no se haya pedido un stop / ingesta mientras se descargaban videos
     if (session.stopping) {
       this.log(session, 'Stop solicitado antes de lanzar FFmpeg → cancelando');
+      return;
+    }
+    if (session.activeIngestId) {
+      this.log(session, 'Ingesta activada durante descarga → cancelando lanzamiento de playlist');
       return;
     }
 
@@ -623,6 +656,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       session.process = null;
 
       if (session.stopping) return;
+      if (session.activeIngestId) return; // ingesta tomó el control — no reiniciar playlist
 
       // ── Reinicio limpio por cambio de programa (no cuenta como fallo) ──────────
       if (session.scheduleChangePending) {
@@ -703,8 +737,14 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
   // ─── Polling m3u8 ──────────────────────────────────────────────
 
-  private waitForM3u8(session: PlayoutSession, m3u8Path: string, token: number) {
-    const MAX_MS  = 120_000;
+  /**
+   * Espera hasta que index.m3u8 exista y luego marca el canal como LIVE_PLAYLIST.
+   * @param maxMs Tiempo máximo de espera en ms. 0 = sin límite (para SRT/RTMP listener).
+   *              Por defecto 120 s para fuentes playlist normales.
+   */
+  private waitForM3u8(session: PlayoutSession, m3u8Path: string, token: number, maxMs?: number) {
+    // 0 → sin límite efectivo (FFmpeg puede tardar indefinidamente esperando conexión entrante)
+    const MAX_MS  = maxMs === 0 ? Number.MAX_SAFE_INTEGER : (maxMs ?? 120_000);
     const POLL_MS = 2_000;
     const t0 = Date.now();
 
@@ -1215,6 +1255,298 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         throw new Error(`normalizeAdSpot falló para ${inputPath}`);
       }
     }
+  }
+
+  // ─── Ingest pública API ───────────────────────────────────────
+
+  /**
+   * Activa una fuente de ingesta: pausa la playlist y lanza FFmpeg con la fuente externa.
+   * El canal debe estar iniciado (sesión activa).
+   */
+  async activateIngest(channelId: string, ingestId: string, userId: string) {
+    const channel = await this.prisma.channel.findFirst({ where: { id: channelId, userId } });
+    if (!channel) throw new NotFoundException('Canal no encontrado');
+
+    const source = await this.prisma.ingestSource.findFirst({ where: { id: ingestId, channelId } });
+    if (!source) throw new NotFoundException('Fuente de ingesta no encontrada');
+
+    const session = this.sessions.get(channelId);
+    if (!session || session.stopping) {
+      throw new BadRequestException('El canal debe estar activo para activar la ingesta. Inicialo primero desde "Canal en vivo".');
+    }
+
+    // Si ya hay otro ingest activo, detenerlo primero
+    if (session.activeIngestId && session.activeIngestId !== ingestId) {
+      const prevId = session.activeIngestId;
+      session.activeIngestId = null;
+      if (session.ingestProcess && !session.ingestProcess.killed) {
+        try { session.ingestProcess.kill('SIGTERM'); } catch { /* ok */ }
+      }
+      session.ingestProcess = null;
+      await this.prisma.ingestSource.update({ where: { id: prevId }, data: { status: 'IDLE' } }).catch(() => {});
+    }
+
+    // Marcar ingesta activa ANTES de matar el proceso principal (evita que el close handler reinicie playlist)
+    session.activeIngestId = ingestId;
+
+    // Matar el proceso principal de playlist si corre
+    if (session.process && !session.process.killed) {
+      this.killSession(session);
+    }
+
+    // Detener salidas RTMP (se reinician cuando la ingesta produce el primer segmento)
+    this.stopRtmpOutputs(session, false);
+
+    // Marcar fuente como ACTIVE y canal como STARTING mientras la ingesta arranca
+    await this.prisma.ingestSource.update({ where: { id: ingestId }, data: { status: 'ACTIVE' } }).catch(() => {});
+    await this.prisma.channel.update({ where: { id: channelId }, data: { status: 'STARTING' } }).catch(() => {});
+
+    this.log(session, `INGEST: Activando fuente "${source.name}" [${source.type}]`);
+
+    // Lanzar en background — la canalización HLS comienza cuando FFmpeg produce el primer m3u8
+    this.launchIngestFfmpeg(session, source).catch((err) => {
+      this.log(session, `ERROR launchIngestFfmpeg: ${err.message}`);
+    });
+
+    return { success: true, message: `Ingesta "${source.name}" activada.` };
+  }
+
+  /**
+   * Desactiva la ingesta activa y retoma la programación normal.
+   */
+  async deactivateIngest(channelId: string, userId: string) {
+    const channel = await this.prisma.channel.findFirst({ where: { id: channelId, userId } });
+    if (!channel) throw new NotFoundException('Canal no encontrado');
+
+    const session = this.sessions.get(channelId);
+    if (!session) return { success: false, message: 'El canal no está activo.' };
+    if (!session.activeIngestId) return { success: false, message: 'No hay ingesta activa.' };
+
+    const ingestId = session.activeIngestId;
+    this.log(session, `INGEST: Desactivando "${ingestId}" → retomando programación normal`);
+
+    // Limpiar ANTES de matar el proceso (el close handler chequeará activeIngestId === null)
+    session.activeIngestId = null;
+
+    if (session.ingestProcess && !session.ingestProcess.killed) {
+      try { session.ingestProcess.kill('SIGTERM'); } catch { /* ok */ }
+    }
+    session.ingestProcess = null;
+
+    // Actualizar status de la fuente
+    await this.prisma.ingestSource.update({ where: { id: ingestId }, data: { status: 'IDLE' } }).catch(() => {});
+
+    // Detener salidas RTMP (se reinician con la playlist)
+    this.stopRtmpOutputs(session, false);
+
+    // Retomar programación normal
+    this.launchFfmpeg(session).catch((err) => {
+      this.log(session, `ERROR retomando playlist: ${err.message}`);
+    });
+
+    return { success: true, message: 'Ingesta desactivada. Retomando programación normal.' };
+  }
+
+  // ─── Ingest privado ───────────────────────────────────────────
+
+  /**
+   * Lanza el proceso FFmpeg para una fuente de ingesta.
+   * Escribe HLS en la misma ruta que la playlist normal.
+   */
+  private async launchIngestFfmpeg(session: PlayoutSession, source: any): Promise<void> {
+    if (session.stopping || !session.activeIngestId) return;
+
+    const m3u8Path   = path.join(session.hlsDir, 'index.m3u8');
+    const hlsArgs = [
+      '-f',                     'hls',
+      '-hls_time',              '4',
+      '-hls_list_size',         '10',
+      '-hls_flags',             'delete_segments+append_list+independent_segments+omit_endlist',
+      '-hls_start_number_source', 'epoch',
+      '-hls_segment_type',      'mpegts',
+      '-hls_segment_filename',  'seg%d.ts',
+      '-y',                     'index.m3u8',
+    ];
+
+    // ─── Armar args de entrada según el tipo de fuente ──────────
+    let inputArgs: string[] = [];
+    let waitMaxMs: number | undefined;
+
+    switch (source.type as string) {
+      case 'YOUTUBE': {
+        this.log(session, 'INGEST: Extrayendo URL de YouTube con yt-dlp...');
+        const ytUrl = await this.extractYouTubeUrl(source.url);
+        if (!ytUrl) {
+          const msg = 'INGEST ERROR: No se pudo obtener la URL de YouTube. Verificá que yt-dlp esté instalado y que la URL sea válida.';
+          this.log(session, msg);
+          await this.prisma.ingestSource.update({ where: { id: source.id }, data: { status: 'ERROR' } }).catch(() => {});
+          if (session.activeIngestId === source.id) {
+            session.activeIngestId = null;
+            this.launchFfmpeg(session).catch(() => {});
+          }
+          return;
+        }
+        this.log(session, `INGEST: URL YouTube obtenida → ${ytUrl.substring(0, 80)}...`);
+        inputArgs = ['-i', ytUrl];
+        break;
+      }
+
+      case 'SRT_CALLER': {
+        const latencyUs = ((source.srtLatency as number | null) ?? 120) * 1000;
+        const pass      = (source.srtPassphrase as string | null)?.trim() ?? '';
+        // url almacena "host" (sin puerto) — el puerto viene de srtPort
+        const host = (source.url as string)?.trim() || '127.0.0.1';
+        const port = (source.srtPort as number | null) ?? 9000;
+        let srtUrl = `srt://${host}:${port}?mode=caller&latency=${latencyUs}`;
+        if (pass) srtUrl += `&passphrase=${pass}`;
+        this.log(session, `INGEST: SRT Caller → srt://${host}:${port}`);
+        inputArgs = ['-i', srtUrl];
+        break;
+      }
+
+      case 'SRT_LISTENER': {
+        const latencyUs = ((source.srtLatency as number | null) ?? 120) * 1000;
+        const pass      = (source.srtPassphrase as string | null)?.trim() ?? '';
+        const port      = (source.srtPort as number | null) ?? 9000;
+        let srtUrl = `srt://:${port}?mode=listener&latency=${latencyUs}`;
+        if (pass) srtUrl += `&passphrase=${pass}`;
+        this.log(session, `INGEST: SRT Listener → esperando en :${port}`);
+        inputArgs = ['-i', srtUrl];
+        waitMaxMs = 0; // sin límite — FFmpeg espera conexión entrante
+        break;
+      }
+
+      case 'RTMP_PUSH': {
+        const port = (source.rtmpPort as number | null) ?? 1935;
+        const key  = (source.rtmpKey  as string | null)?.trim() || 'live';
+        this.log(session, `INGEST: RTMP Push → escuchando en rtmp://0.0.0.0:${port}/live/${key}`);
+        inputArgs = ['-listen', '1', '-i', `rtmp://0.0.0.0:${port}/live/${key}`];
+        waitMaxMs = 0; // sin límite — FFmpeg espera que el encoder conecte
+        break;
+      }
+
+      default:
+        this.log(session, `INGEST ERROR: Tipo desconocido "${source.type}"`);
+        return;
+    }
+
+    // ─── Calidad de re-encode ────────────────────────────────────
+    const channelData = await this.prisma.channel.findUnique({
+      where: { id: session.channelId },
+      select: { videoQuality: true },
+    });
+    const qKey    = channelData?.videoQuality ?? '480p';
+    const quality = VIDEO_QUALITY[qKey] ?? VIDEO_QUALITY['480p'];
+    const scale   = quality.scale;
+
+    const normalizeVf = `scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,fps=25,format=yuv420p`;
+    const audioFilter = 'aformat=channel_layouts=stereo,aresample=async=1000';
+
+    const args: string[] = [
+      '-loglevel', 'warning',
+      ...inputArgs,
+      '-vf', normalizeVf,
+      '-af', audioFilter,
+      '-c:v', 'libx264',
+      '-preset', this.config.get('FFMPEG_PRESET', 'ultrafast'),
+      '-crf', '26',
+      '-b:v', quality.vBitrate, '-maxrate', quality.maxrate, '-bufsize', quality.bufsize,
+      '-g', '50', '-sc_threshold', '0',
+      '-c:a', 'aac', '-b:a', quality.aBitrate, '-ar', '44100', '-ac', '2',
+      ...hlsArgs,
+    ];
+
+    if (session.stopping || !session.activeIngestId) return;
+
+    // Token para waitForM3u8
+    session.pollToken++;
+    const myPollToken = session.pollToken;
+
+    const proc = spawn('ffmpeg', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      cwd:   session.hlsDir,
+    });
+    session.ingestProcess = proc;
+
+    if (session.stopping || !session.activeIngestId) {
+      try { proc.kill('SIGTERM'); } catch { /* ok */ }
+      session.ingestProcess = null;
+      return;
+    }
+
+    let spawnedAt = Date.now();
+
+    proc.stderr.on('data', (chunk: Buffer) => {
+      chunk.toString().split('\n').forEach(l => {
+        const t = l.trim();
+        if (t) this.log(session, `ingest: ${t}`);
+      });
+    });
+
+    proc.on('spawn', () => {
+      spawnedAt = Date.now();
+      this.log(session, `FFmpeg INGEST PID=${proc.pid}. Esperando segmentos HLS...`);
+      this.waitForM3u8(session, m3u8Path, myPollToken, waitMaxMs);
+    });
+
+    proc.on('close', async (code, sig) => {
+      const uptime = Date.now() - spawnedAt;
+      this.log(session, `FFmpeg INGEST terminó (code=${code} sig=${sig} uptime=${uptime}ms)`);
+      session.ingestProcess = null;
+
+      if (session.stopping) return;
+      // activeIngestId === null → deactivateIngest() ya lo limpió; launchFfmpeg ya fue llamado
+      if (!session.activeIngestId) return;
+
+      // Terminación inesperada — marcar ERROR y retomar programación
+      this.log(session, `INGEST: Fuente terminó inesperadamente → retomando programación normal`);
+      const ingestId = session.activeIngestId;
+      session.activeIngestId = null;
+
+      await this.prisma.ingestSource.update({ where: { id: ingestId }, data: { status: 'ERROR' } }).catch(() => {});
+      this.stopRtmpOutputs(session, false);
+
+      setTimeout(() => {
+        if (!session.stopping && this.sessions.has(session.channelId)) {
+          this.launchFfmpeg(session);
+        }
+      }, 2_000);
+    });
+
+    proc.on('error', async (err) => {
+      session.ingestProcess = null;
+      this.log(session, `INGEST spawn error: ${err.message}`);
+      if (session.activeIngestId) {
+        const ingestId = session.activeIngestId;
+        session.activeIngestId = null;
+        await this.prisma.ingestSource.update({ where: { id: ingestId }, data: { status: 'ERROR' } }).catch(() => {});
+        if (!session.stopping && this.sessions.has(session.channelId)) {
+          setTimeout(() => this.launchFfmpeg(session), 2_000);
+        }
+      }
+    });
+  }
+
+  /**
+   * Extrae la URL directa de una señal YouTube/Live usando yt-dlp.
+   * Requiere yt-dlp instalado en el contenedor.
+   * Retorna null si yt-dlp no está disponible o la URL es inválida.
+   */
+  private async extractYouTubeUrl(url: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      const proc = spawn(
+        'yt-dlp',
+        ['-f', 'best[height<=720]/best', '--no-playlist', '-g', url],
+        { stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      let output = '';
+      proc.stdout.on('data', (chunk: Buffer) => { output += chunk.toString(); });
+      proc.on('close', (code) => {
+        const directUrl = output.trim().split('\n')[0] ?? '';
+        resolve(code === 0 && directUrl ? directUrl : null);
+      });
+      proc.on('error', () => resolve(null)); // ENOENT si yt-dlp no está instalado
+    });
   }
 
   // ─── Playlist activa ───────────────────────────────────────────
