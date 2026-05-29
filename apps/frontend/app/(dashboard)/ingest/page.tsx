@@ -348,7 +348,9 @@ function IngestFormModal({ channelId, editing, onClose }: ModalProps) {
   const [srtPort,       setSrtPort]       = useState(editing?.srtPort?.toString()    ?? '');
   const [srtLatency,    setSrtLatency]    = useState(editing?.srtLatency?.toString() ?? '120');
   const [srtPassphrase, setSrtPassphrase] = useState(editing?.srtPassphrase  ?? '');
+  const [srtStreamId,   setSrtStreamId]   = useState(editing?.srtStreamId    ?? '');
   const [rtmpPort,      setRtmpPort]      = useState(editing?.rtmpPort?.toString()   ?? '1935');
+  const [rtmpApp,       setRtmpApp]       = useState(editing?.rtmpApp        ?? 'live');
   const [rtmpKey,       setRtmpKey]       = useState(editing?.rtmpKey        ?? '');
 
   const createMut = useCreateIngest();
@@ -369,7 +371,9 @@ function IngestFormModal({ channelId, editing, onClose }: ModalProps) {
       srtPort:       srtPort       ? parseInt(srtPort)    : undefined,
       srtLatency:    srtLatency    ? parseInt(srtLatency) : undefined,
       srtPassphrase: srtPassphrase.trim() || undefined,
+      srtStreamId:   srtStreamId.trim()   || undefined,
       rtmpPort:      rtmpPort      ? parseInt(rtmpPort)   : undefined,
+      rtmpApp:       rtmpApp.trim()        || undefined,
       rtmpKey:       rtmpKey.trim()        || undefined,
     };
 
@@ -485,66 +489,98 @@ function IngestFormModal({ channelId, editing, onClose }: ModalProps) {
 
             {/* SRT fields (Caller + Listener) */}
             {isSrt && (
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1.5">Puerto SRT</label>
-                  <input
-                    type="number"
-                    value={srtPort}
-                    onChange={e => setSrtPort(e.target.value)}
-                    placeholder="9000"
-                    min={1} max={65535}
-                    className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1.5">Latencia (ms)</label>
-                  <input
-                    type="number"
-                    value={srtLatency}
-                    onChange={e => setSrtLatency(e.target.value)}
-                    placeholder="120"
-                    min={20} max={8000}
-                    className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
-                  />
-                </div>
-                <div className="col-span-2">
-                  <label className="block text-xs font-medium text-slate-400 mb-1.5">
-                    Passphrase AES <span className="text-slate-500 font-normal">(opcional, 10–79 chars)</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={srtPassphrase}
-                    onChange={e => setSrtPassphrase(e.target.value)}
-                    placeholder="Dejá vacío si no usás cifrado"
-                    maxLength={79}
-                    className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
-                  />
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-400 mb-1.5">Puerto SRT</label>
+                    <input
+                      type="number"
+                      value={srtPort}
+                      onChange={e => setSrtPort(e.target.value)}
+                      placeholder="9000"
+                      min={1} max={65535}
+                      className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-400 mb-1.5">Latencia (ms)</label>
+                    <input
+                      type="number"
+                      value={srtLatency}
+                      onChange={e => setSrtLatency(e.target.value)}
+                      placeholder="120"
+                      min={20} max={8000}
+                      className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-400 mb-1.5">
+                      Passphrase AES <span className="text-slate-500 font-normal">(opcional, 10–79 ch)</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={srtPassphrase}
+                      onChange={e => setSrtPassphrase(e.target.value)}
+                      placeholder="Vacío = sin cifrado"
+                      maxLength={79}
+                      className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-400 mb-1.5">
+                      Stream ID <span className="text-slate-500 font-normal">(opcional)</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={srtStreamId}
+                      onChange={e => setSrtStreamId(e.target.value)}
+                      placeholder="Ej: #!::r=mystream,m=request"
+                      maxLength={512}
+                      className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
+                    />
+                  </div>
                 </div>
               </div>
             )}
 
             {/* RTMP Push fields */}
             {isRtmp && (
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1.5">Puerto RTMP</label>
-                  <input
-                    type="number"
-                    value={rtmpPort}
-                    onChange={e => setRtmpPort(e.target.value)}
-                    placeholder="1935"
-                    min={1} max={65535}
-                    className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
-                  />
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-400 mb-1.5">Puerto RTMP</label>
+                    <input
+                      type="number"
+                      value={rtmpPort}
+                      onChange={e => setRtmpPort(e.target.value)}
+                      placeholder="1935"
+                      min={1} max={65535}
+                      className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-400 mb-1.5">
+                      Nombre de app <span className="text-slate-500 font-normal">(path tras el puerto)</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={rtmpApp}
+                      onChange={e => setRtmpApp(e.target.value)}
+                      placeholder="live"
+                      maxLength={128}
+                      className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
+                    />
+                  </div>
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1.5">Stream Key</label>
+                  <label className="block text-xs font-medium text-slate-400 mb-1.5">
+                    Stream Key <span className="text-slate-500 font-normal">(opcional)</span>
+                  </label>
                   <input
                     type="text"
                     value={rtmpKey}
                     onChange={e => setRtmpKey(e.target.value)}
-                    placeholder="live"
+                    placeholder="Dejá vacío si tu encoder no usa stream key"
                     maxLength={128}
                     className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
                   />
@@ -556,10 +592,14 @@ function IngestFormModal({ channelId, editing, onClose }: ModalProps) {
             {type === 'SRT_LISTENER' && (
               <div className="bg-teal-500/10 border border-teal-500/20 rounded-xl p-3 flex gap-2.5">
                 <Info className="w-4 h-4 text-teal-400 flex-shrink-0 mt-0.5" />
-                <div className="text-xs text-teal-300 space-y-1">
-                  <p className="font-medium">Tu encoder debe conectarse a:</p>
-                  <code className="block text-teal-200">srt://[IP del servidor]:{srtPort || '9000'}?mode=caller</code>
-                  <p className="text-teal-400">Configurá esta dirección en OBS / vMix / FFmpeg. Cada cliente gestiona su propia red ZeroTier.</p>
+                <div className="text-xs text-teal-300 space-y-1.5 w-full min-w-0">
+                  <p className="font-medium">Tu encoder debe conectarse a esta URL:</p>
+                  <code className="block text-teal-200 break-all">
+                    srt://[IP del servidor]:{srtPort || '9000'}?mode=caller&latency={(parseInt(srtLatency||'120')*1000)||120000}
+                    {srtPassphrase ? `&passphrase=${srtPassphrase}` : ''}
+                    {srtStreamId   ? `&streamid=${srtStreamId}`     : ''}
+                  </code>
+                  <p className="text-teal-400">Copiá esta URL en OBS / vMix / FFmpeg.</p>
                 </div>
               </div>
             )}
@@ -568,10 +608,16 @@ function IngestFormModal({ channelId, editing, onClose }: ModalProps) {
             {type === 'RTMP_PUSH' && (
               <div className="bg-orange-500/10 border border-orange-500/20 rounded-xl p-3 flex gap-2.5">
                 <Info className="w-4 h-4 text-orange-400 flex-shrink-0 mt-0.5" />
-                <div className="text-xs text-orange-300 space-y-1">
+                <div className="text-xs text-orange-300 space-y-1.5 w-full min-w-0">
                   <p className="font-medium">Tu encoder debe enviar a:</p>
-                  <code className="block text-orange-200">rtmp://[IP del servidor]:{rtmpPort || '1935'}/live/{rtmpKey || 'live'}</code>
-                  <p className="text-orange-400">En OBS: Servidor = <code>rtmp://IP:{rtmpPort || '1935'}/live</code> — Clave = <code>{rtmpKey || 'live'}</code></p>
+                  <code className="block text-orange-200 break-all">
+                    rtmp://[IP del servidor]:{rtmpPort || '1935'}/{rtmpApp || 'live'}{rtmpKey ? `/${rtmpKey}` : ''}
+                  </code>
+                  <div className="text-orange-400 space-y-0.5">
+                    <p>En OBS → Servidor: <code className="text-orange-200">rtmp://IP:{rtmpPort || '1935'}/{rtmpApp || 'live'}</code></p>
+                    {rtmpKey && <p>En OBS → Clave de stream: <code className="text-orange-200">{rtmpKey}</code></p>}
+                    {!rtmpKey && <p>Dejá la clave de stream vacía en OBS (o usá cualquier valor si el encoder lo requiere).</p>}
+                  </div>
                 </div>
               </div>
             )}
@@ -630,34 +676,49 @@ function IngestCard({
         return source.url ? (
           <span className="text-slate-400 truncate max-w-[280px]">{source.url}</span>
         ) : null;
-      case 'SRT_CALLER':
+      case 'SRT_CALLER': {
+        const srtCallerUrl = (() => {
+          const lat = ((source.srtLatency ?? 120) * 1000);
+          let u = `srt://${source.url || '?'}:${source.srtPort ?? '?'}?mode=caller&latency=${lat}`;
+          if (source.srtPassphrase) u += `&passphrase=${source.srtPassphrase}`;
+          if (source.srtStreamId)   u += `&streamid=${source.srtStreamId}`;
+          return u;
+        })();
         return (
-          <span className="text-slate-400 font-mono text-xs">
-            srt://{source.url || '?'}:{source.srtPort ?? '?'}
-            {source.srtLatency ? <span className="text-slate-500"> · {source.srtLatency}ms</span> : null}
-            {source.srtPassphrase ? <span className="text-slate-500"> · AES</span> : null}
-          </span>
-        );
-      case 'SRT_LISTENER':
-        return (
-          <div className="flex items-center gap-1.5">
-            <span className="text-slate-400 font-mono text-xs">
-              srt://[servidor]:{source.srtPort ?? '?'}
-              {source.srtLatency ? <span className="text-slate-500"> · {source.srtLatency}ms</span> : null}
-              {source.srtPassphrase ? <span className="text-slate-500"> · AES</span> : null}
-            </span>
-            <CopyBtn text={`srt://[servidor]:${source.srtPort ?? 9000}?mode=caller`} />
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="text-slate-400 font-mono text-xs truncate">{srtCallerUrl}</span>
+            <CopyBtn text={srtCallerUrl} />
           </div>
         );
-      case 'RTMP_PUSH':
+      }
+      case 'SRT_LISTENER': {
+        const srtListenUrl = (() => {
+          const lat = ((source.srtLatency ?? 120) * 1000);
+          let u = `srt://[servidor]:${source.srtPort ?? '?'}?mode=caller&latency=${lat}`;
+          if (source.srtPassphrase) u += `&passphrase=${source.srtPassphrase}`;
+          if (source.srtStreamId)   u += `&streamid=${source.srtStreamId}`;
+          return u;
+        })();
         return (
-          <div className="flex items-center gap-1.5">
-            <span className="text-slate-400 font-mono text-xs">
-              rtmp://[servidor]:{source.rtmpPort ?? 1935}/live/{source.rtmpKey ?? 'live'}
-            </span>
-            <CopyBtn text={`rtmp://[servidor]:${source.rtmpPort ?? 1935}/live/${source.rtmpKey ?? 'live'}`} />
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="text-slate-400 font-mono text-xs truncate">{srtListenUrl}</span>
+            <CopyBtn text={srtListenUrl} />
           </div>
         );
+      }
+      case 'RTMP_PUSH': {
+        const app = source.rtmpApp || 'live';
+        const key = source.rtmpKey || '';
+        const rtmpUrl = key
+          ? `rtmp://[servidor]:${source.rtmpPort ?? 1935}/${app}/${key}`
+          : `rtmp://[servidor]:${source.rtmpPort ?? 1935}/${app}`;
+        return (
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="text-slate-400 font-mono text-xs truncate">{rtmpUrl}</span>
+            <CopyBtn text={rtmpUrl.replace('[servidor]', '[IP_SERVIDOR]')} />
+          </div>
+        );
+      }
       default: return null;
     }
   })();

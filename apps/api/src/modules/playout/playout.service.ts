@@ -1466,24 +1466,28 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       }
 
       case 'SRT_CALLER': {
-        const latencyUs = ((source.srtLatency as number | null) ?? 120) * 1_000;
-        const pass      = (source.srtPassphrase as string | null)?.trim() ?? '';
-        const host      = (source.url as string)?.trim() || '127.0.0.1';
-        const port      = (source.srtPort as number | null) ?? 9000;
+        const latencyUs  = ((source.srtLatency  as number | null) ?? 120) * 1_000;
+        const pass       = (source.srtPassphrase as string | null)?.trim() ?? '';
+        const streamId   = (source.srtStreamId  as string | null)?.trim() ?? '';
+        const host       = (source.url          as string)?.trim() || '127.0.0.1';
+        const port       = (source.srtPort      as number | null) ?? 9000;
         let srtUrl = `srt://${host}:${port}?mode=caller&latency=${latencyUs}`;
-        if (pass) srtUrl += `&passphrase=${pass}`;
-        this.log(session, `INGEST: SRT Caller → srt://${host}:${port}`);
+        if (pass)     srtUrl += `&passphrase=${pass}`;
+        if (streamId) srtUrl += `&streamid=${encodeURIComponent(streamId)}`;
+        this.log(session, `INGEST: SRT Caller → ${srtUrl}`);
         inputArgs = ['-i', srtUrl];
         break;
       }
 
       case 'SRT_LISTENER': {
-        const latencyUs = ((source.srtLatency as number | null) ?? 120) * 1_000;
-        const pass      = (source.srtPassphrase as string | null)?.trim() ?? '';
-        const port      = (source.srtPort as number | null) ?? 9000;
+        const latencyUs  = ((source.srtLatency  as number | null) ?? 120) * 1_000;
+        const pass       = (source.srtPassphrase as string | null)?.trim() ?? '';
+        const streamId   = (source.srtStreamId  as string | null)?.trim() ?? '';
+        const port       = (source.srtPort      as number | null) ?? 9000;
         let srtUrl = `srt://:${port}?mode=listener&latency=${latencyUs}`;
-        if (pass) srtUrl += `&passphrase=${pass}`;
-        this.log(session, `INGEST: SRT Listener → esperando en :${port}`);
+        if (pass)     srtUrl += `&passphrase=${pass}`;
+        if (streamId) srtUrl += `&streamid=${encodeURIComponent(streamId)}`;
+        this.log(session, `INGEST: SRT Listener → esperando en :${port}${streamId ? ` (streamid: ${streamId})` : ''}`);
         inputArgs = ['-i', srtUrl];
         waitMaxMs = 0; // sin límite — FFmpeg espera conexión entrante
         break;
@@ -1491,9 +1495,14 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
       case 'RTMP_PUSH': {
         const port = (source.rtmpPort as number | null) ?? 1935;
-        const key  = (source.rtmpKey  as string | null)?.trim() || 'live';
-        this.log(session, `INGEST: RTMP Push → escuchando en rtmp://0.0.0.0:${port}/live/${key}`);
-        inputArgs = ['-listen', '1', '-i', `rtmp://0.0.0.0:${port}/live/${key}`];
+        const app  = (source.rtmpApp  as string | null)?.trim() || 'live';
+        const key  = (source.rtmpKey  as string | null)?.trim() || '';
+        // La URL de escucha incluye el app, y la key solo si está definida
+        const rtmpListenUrl = key
+          ? `rtmp://0.0.0.0:${port}/${app}/${key}`
+          : `rtmp://0.0.0.0:${port}/${app}`;
+        this.log(session, `INGEST: RTMP Push → escuchando en ${rtmpListenUrl}`);
+        inputArgs = ['-listen', '1', '-i', rtmpListenUrl];
         waitMaxMs = 0;
         break;
       }
