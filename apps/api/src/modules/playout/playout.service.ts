@@ -448,7 +448,12 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       await insertBlock(scheduleEntry.postAdBlock, 'POST_ROLL');
     }
 
-    await fs.writeFile(concatPath, 'ffconcat version 1.0\n' + concatLines.join('\n') + '\n');
+    // NOTA: NO usar "ffconcat version 1.0" header aquí.
+    // Con -stream_loop -1 el concat demuxer necesita el modo clásico (-f concat)
+    // para mantener timestamps continuos en el loop infinito.
+    // El header "ffconcat version 1.0" cambia el manejo de timestamps y rompe
+    // el loopeo cuando el playlist termina su primer ciclo.
+    await fs.writeFile(concatPath, concatLines.join('\n') + '\n');
     this.log(
       session,
       `concat.txt: ${downloadedMp4s.length} video(s)${totalAdsInjected > 0 ? ` + ${totalAdsInjected} spot(s) publicitario(s)` : ' (sin publicidad)'}`,

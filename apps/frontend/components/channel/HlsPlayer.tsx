@@ -11,9 +11,14 @@ interface Props {
   starting?: boolean;
 }
 
+const SAFARI_MAX_RETRIES  = 15;   // 15 × 3 s = 45 s de espera máxima
+const SAFARI_RETRY_MS     = 3000;
+const HLS_MANIFEST_RETRY  = 20;   // intentos de hls.js para el manifest
+const HLS_FRAG_RETRY      = 6;    // intentos de hls.js por fragmento
+
 export function HlsPlayer({ src, active = true, starting = false }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const hlsRef = useRef<any>(null);
+  const hlsRef   = useRef<any>(null);
   const [state, setState] = useState<'loading' | 'playing' | 'error' | 'offline' | 'starting'>('offline');
   const [errorMsg, setErrorMsg] = useState('');
 
@@ -39,27 +44,44 @@ export function HlsPlayer({ src, active = true, starting = false }: Props) {
     setErrorMsg('');
 
     let destroyed = false;
-
-    // Handlers para limpiar en cleanup
-    let onPlaying: (() => void) | null = null;
+    let onPlaying:   (() => void) | null = null;
+    let onError:     (() => void) | null = null;
+    let retryTimeout: ReturnType<typeof setTimeout> | null = null;
 
     const init = async () => {
-      // Safari nativo soporta HLS directamente
+      // ── Safari: soporta HLS nativamente ─────────────────────────────────
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        video.src = src;
+        let retries = 0;
+
+        // Reintentar carga: útil cuando el stream arranca justo en este instante
+        const tryLoad = () => {
+          if (destroyed) return;
+          video.src = '';
+          video.src = src;
+          video.load();
+          video.play().catch(() => {});
+        };
+
         onPlaying = () => { if (!destroyed) setState('playing'); };
         video.addEventListener('playing', onPlaying, { once: true });
-        video.addEventListener('error', () => {
-          if (!destroyed) {
+
+        onError = () => {
+          if (destroyed) return;
+          if (retries < SAFARI_MAX_RETRIES) {
+            retries++;
+            retryTimeout = setTimeout(tryLoad, SAFARI_RETRY_MS);
+          } else {
             setState('error');
             setErrorMsg('No se pudo reproducir el stream');
           }
-        }, { once: true });
-        video.play().catch(() => {});
+        };
+        video.addEventListener('error', onError);
+
+        tryLoad();
         return;
       }
 
-      // Chrome / Firefox → usar hls.js
+      // ── Chrome / Firefox: hls.js ─────────────────────────────────────────
       const HlsLib = (await import('hls.js')).default;
 
       if (!HlsLib.isSupported()) {
@@ -69,36 +91,30 @@ export function HlsPlayer({ src, active = true, starting = false }: Props) {
       }
 
       const hls = new HlsLib({
-        lowLatencyMode: false,
-        backBufferLength: 30,
-        maxBufferLength: 30,
-        maxMaxBufferLength: 60,
-        // Reintentar la carga del manifest si no está listo aún
-        manifestLoadingRetryDelay: 3000,
-        manifestLoadingMaxRetry: 20,
-        // Reintentar fragmentos: evita error fatal por un segmento eliminado
-        fragLoadingMaxRetry: 6,
-        fragLoadingRetryDelay: 1500,
+        lowLatencyMode:              false,
+        backBufferLength:            30,
+        maxBufferLength:             30,
+        maxMaxBufferLength:          60,
+        manifestLoadingRetryDelay:   3000,
+        manifestLoadingMaxRetry:     HLS_MANIFEST_RETRY,
+        fragLoadingMaxRetry:         HLS_FRAG_RETRY,
+        fragLoadingRetryDelay:       1500,
       });
       hlsRef.current = hls;
 
       hls.loadSource(src);
       hls.attachMedia(video);
 
-      // Cuando el manifest está parseado, intentar play()
       hls.on(HlsLib.Events.MANIFEST_PARSED, () => {
         if (!destroyed) video.play().catch(() => {});
       });
 
-      // Cuando el primer fragmento está en el buffer, volver a intentar
-      // play() por si el primer intento fue rechazado (video hidden, etc.)
       hls.on(HlsLib.Events.FRAG_BUFFERED, () => {
         if (!destroyed && video.paused) {
           video.play().catch(() => {});
         }
       });
 
-      // Listener principal para transición a 'playing'
       onPlaying = () => { if (!destroyed) setState('playing'); };
       video.addEventListener('playing', onPlaying, { once: true });
 
@@ -124,10 +140,12 @@ export function HlsPlayer({ src, active = true, starting = false }: Props) {
 
     return () => {
       destroyed = true;
-      // Limpiar el listener de 'playing' si no se disparó
-      if (onPlaying && video) {
-        video.removeEventListener('playing', onPlaying);
-      }
+      if (retryTimeout) clearTimeout(retryTimeout);
+      // Limpiar listeners de Safari
+      const v = videoRef.current;
+      if (onPlaying && v) v.removeEventListener('playing', onPlaying);
+      if (onError   && v) v.removeEventListener('error',   onError);
+      // Limpiar hls.js
       hlsRef.current?.destroy();
       hlsRef.current = null;
     };
@@ -136,11 +154,9 @@ export function HlsPlayer({ src, active = true, starting = false }: Props) {
   return (
     <div className="relative w-full h-full bg-black">
       {/*
-        El <video> SIEMPRE está en el DOM y en layout (nunca display:none).
-        Con display:none Chrome puede rechazar video.play() o no disparar
-        el evento 'playing' incluso en videos muted.
-        Usamos visibility+opacity para ocultarlo visualmente cuando no está
-        reproduciendo, mientras los overlays de estado aparecen encima.
+        El <video> SIEMPRE está en el DOM (nunca display:none).
+        visibility+opacity oculta visualmente mientras los overlays de estado
+        aparecen encima, sin perder el contexto del elemento de media.
       */}
       <video
         ref={videoRef}
@@ -155,7 +171,8 @@ export function HlsPlayer({ src, active = true, starting = false }: Props) {
         playsInline
       />
 
-      {/* Overlay states — absolutas sobre el video */}
+      {/* ── Overlays de estado ── */}
+
       {state === 'offline' && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
           <div className="w-14 h-14 rounded-2xl bg-surface-600 flex items-center justify-center">
