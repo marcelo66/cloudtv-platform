@@ -1399,26 +1399,46 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         this.log(session, 'INGEST: Iniciando yt-dlp → FFmpeg pipe para YouTube Live...');
         const ytArgs: string[] = [
           '--no-playlist',
-          // Usa Node.js (ya en el container) como JS runtime en lugar de deno
+          // Node.js como JS runtime para generar po_tokens (auto-generados con node)
           '--js-runtimes', 'node',
-          // TV embedded + web client: suele evadir la detección de bots en IPs de servidor
-          '--extractor-args', 'youtube:player_client=tv_embedded,web',
-          // Sin cache de archivos para evitar datos corruptos entre reinicios
+          // Cliente iOS: el más confiable en IPs de datacenter sin cookies.
+          // tv_embedded fue removido en versiones recientes de yt-dlp.
+          '--extractor-args', 'youtube:player_client=ios,web',
           '--no-cache-dir',
           '-f', 'best[height<=720]/best',
-          '-o', '-',          // stream a stdout (pipe → FFmpeg stdin)
+          '-o', '-',
         ];
-        // Soporte opcional de cookies: definir YTDLP_COOKIES_FILE en las env vars del servicio.
-        // Exportar cookies de YouTube con una cuenta real elimina por completo el bot detection.
+
+        // ── Cookies (solución definitiva al bot-detection) ────────────
+        // Opción A: ruta directa a un archivo cookies.txt en el container
         const cookiesFile = this.config.get<string>('YTDLP_COOKIES_FILE', '');
+        // Opción B: contenido de cookies.txt codificado en base64
+        //   → Genera con: base64 -w0 cookies.txt   (Linux/Mac)
+        //                 [Convert]::ToBase64String([IO.File]::ReadAllBytes('cookies.txt'))  (PowerShell)
+        //   → Pega el resultado en EasyPanel → Variables → YTDLP_COOKIES_B64
+        const cookiesB64  = this.config.get<string>('YTDLP_COOKIES_B64', '');
+
         if (cookiesFile) {
           ytArgs.push('--cookies', cookiesFile);
           this.log(session, `INGEST: yt-dlp usando cookies desde ${cookiesFile}`);
+        } else if (cookiesB64) {
+          // Decodificar base64 y escribir en /tmp en cada activación
+          const tmpCookies = '/tmp/yt-dlp-cookies.txt';
+          try {
+            await fs.writeFile(tmpCookies, Buffer.from(cookiesB64, 'base64'));
+            ytArgs.push('--cookies', tmpCookies);
+            this.log(session, 'INGEST: yt-dlp usando cookies (YTDLP_COOKIES_B64 → /tmp/yt-dlp-cookies.txt)');
+          } catch (e: any) {
+            this.log(session, `INGEST: WARN no se pudo escribir cookies temp: ${e.message}`);
+          }
+        } else {
+          this.log(session, 'INGEST: Sin cookies configuradas — bot-detection probable en IPs de servidor');
         }
+
         ytArgs.push(source.url as string);
         ytDlpProc = spawn('yt-dlp', ytArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
         session.ytDlpProcess = ytDlpProc;
-        inputArgs = ['-i', 'pipe:0']; // FFmpeg leerá desde stdin
+        inputArgs = ['-i', 'pipe:0'];
         break;
       }
 
