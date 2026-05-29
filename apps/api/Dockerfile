@@ -17,9 +17,14 @@ RUN ./node_modules/.bin/nest build
 
 # ─── Imagen final ─────────────────────────────────────────────
 FROM node:20-slim AS runner
-# Instalar FFmpeg + OpenSSL + fuentes DejaVu (drawtext) + cliente de postgres
+# Instalar FFmpeg + OpenSSL + fuentes DejaVu (drawtext) + cliente de postgres + curl
+# yt-dlp: se descarga el binario standalone para Linux x86_64 (~15 MB, Python incluido).
+# Necesario para extraer la URL directa de streams YouTube Live en el módulo de ingesta.
 RUN apt-get update && \
-    apt-get install -y ffmpeg openssl postgresql-client fonts-dejavu-core && \
+    apt-get install -y ffmpeg openssl postgresql-client fonts-dejavu-core curl && \
+    curl -sSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux \
+         -o /usr/local/bin/yt-dlp && \
+    chmod a+rx /usr/local/bin/yt-dlp && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV NODE_ENV=production
