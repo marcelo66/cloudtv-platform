@@ -349,6 +349,7 @@ function IngestFormModal({ channelId, editing, onClose }: ModalProps) {
   const [srtLatency,    setSrtLatency]    = useState(editing?.srtLatency?.toString() ?? '120');
   const [srtPassphrase, setSrtPassphrase] = useState(editing?.srtPassphrase  ?? '');
   const [srtStreamId,   setSrtStreamId]   = useState(editing?.srtStreamId    ?? '');
+  const [rtmpHost,      setRtmpHost]      = useState(editing?.rtmpHost       ?? '');
   const [rtmpPort,      setRtmpPort]      = useState(editing?.rtmpPort?.toString()   ?? '1935');
   const [rtmpApp,       setRtmpApp]       = useState(editing?.rtmpApp        ?? 'live');
   const [rtmpKey,       setRtmpKey]       = useState(editing?.rtmpKey        ?? '');
@@ -372,6 +373,7 @@ function IngestFormModal({ channelId, editing, onClose }: ModalProps) {
       srtLatency:    srtLatency    ? parseInt(srtLatency) : undefined,
       srtPassphrase: srtPassphrase.trim() || undefined,
       srtStreamId:   srtStreamId.trim()   || undefined,
+      rtmpHost:      rtmpHost.trim()       || undefined,
       rtmpPort:      rtmpPort      ? parseInt(rtmpPort)   : undefined,
       rtmpApp:       rtmpApp.trim()        || undefined,
       rtmpKey:       rtmpKey.trim()        || undefined,
@@ -543,9 +545,29 @@ function IngestFormModal({ channelId, editing, onClose }: ModalProps) {
               </div>
             )}
 
-            {/* RTMP Push fields */}
+            {/* RTMP fields */}
             {isRtmp && (
               <div className="space-y-3">
+                {/* Host (pull mode) */}
+                <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1.5">
+                    Servidor RTMP <span className="text-slate-500 font-normal">(host/IP de la fuente externa)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={rtmpHost}
+                    onChange={e => setRtmpHost(e.target.value)}
+                    placeholder="Ej: stmvideo6.livecastv.com  |  Vacío = recibir push de un encoder"
+                    maxLength={253}
+                    className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
+                  />
+                  <p className="mt-1 text-xs text-slate-500">
+                    {rtmpHost.trim()
+                      ? '↗ Modo Pull: el servidor se conecta a la fuente RTMP externa.'
+                      : '↙ Modo Push: tu encoder (OBS, vMix…) conecta al servidor.'}
+                  </p>
+                </div>
+
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="block text-xs font-medium text-slate-400 mb-1.5">Puerto RTMP</label>
@@ -560,7 +582,7 @@ function IngestFormModal({ channelId, editing, onClose }: ModalProps) {
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-slate-400 mb-1.5">
-                      Nombre de app <span className="text-slate-500 font-normal">(path tras el puerto)</span>
+                      App <span className="text-slate-500 font-normal">(path tras el puerto)</span>
                     </label>
                     <input
                       type="text"
@@ -572,6 +594,7 @@ function IngestFormModal({ channelId, editing, onClose }: ModalProps) {
                     />
                   </div>
                 </div>
+
                 <div>
                   <label className="block text-xs font-medium text-slate-400 mb-1.5">
                     Stream Key <span className="text-slate-500 font-normal">(opcional)</span>
@@ -580,7 +603,7 @@ function IngestFormModal({ channelId, editing, onClose }: ModalProps) {
                     type="text"
                     value={rtmpKey}
                     onChange={e => setRtmpKey(e.target.value)}
-                    placeholder="Dejá vacío si tu encoder no usa stream key"
+                    placeholder="Dejá vacío si no hay stream key"
                     maxLength={128}
                     className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
                   />
@@ -604,22 +627,37 @@ function IngestFormModal({ channelId, editing, onClose }: ModalProps) {
               </div>
             )}
 
-            {/* RTMP Push: info de conexión */}
+            {/* RTMP: info de conexión — cambia según modo push/pull */}
             {type === 'RTMP_PUSH' && (
-              <div className="bg-orange-500/10 border border-orange-500/20 rounded-xl p-3 flex gap-2.5">
-                <Info className="w-4 h-4 text-orange-400 flex-shrink-0 mt-0.5" />
-                <div className="text-xs text-orange-300 space-y-1.5 w-full min-w-0">
-                  <p className="font-medium">Tu encoder debe enviar a:</p>
-                  <code className="block text-orange-200 break-all">
-                    rtmp://[IP del servidor]:{rtmpPort || '1935'}/{rtmpApp || 'live'}{rtmpKey ? `/${rtmpKey}` : ''}
-                  </code>
-                  <div className="text-orange-400 space-y-0.5">
-                    <p>En OBS → Servidor: <code className="text-orange-200">rtmp://IP:{rtmpPort || '1935'}/{rtmpApp || 'live'}</code></p>
-                    {rtmpKey && <p>En OBS → Clave de stream: <code className="text-orange-200">{rtmpKey}</code></p>}
-                    {!rtmpKey && <p>Dejá la clave de stream vacía en OBS (o usá cualquier valor si el encoder lo requiere).</p>}
+              rtmpHost.trim() ? (
+                /* Pull mode */
+                <div className="bg-orange-500/10 border border-orange-500/20 rounded-xl p-3 flex gap-2.5">
+                  <Info className="w-4 h-4 text-orange-400 flex-shrink-0 mt-0.5" />
+                  <div className="text-xs text-orange-300 space-y-1.5 w-full min-w-0">
+                    <p className="font-medium">El servidor se conectará a:</p>
+                    <code className="block text-orange-200 break-all">
+                      rtmp://{rtmpHost.trim()}:{rtmpPort || '1935'}/{rtmpApp || 'live'}{rtmpKey ? `/${rtmpKey}` : ''}
+                    </code>
+                    <p className="text-orange-400">No necesitás configurar nada en OBS. El servidor jalará la señal automáticamente.</p>
                   </div>
                 </div>
-              </div>
+              ) : (
+                /* Push mode */
+                <div className="bg-orange-500/10 border border-orange-500/20 rounded-xl p-3 flex gap-2.5">
+                  <Info className="w-4 h-4 text-orange-400 flex-shrink-0 mt-0.5" />
+                  <div className="text-xs text-orange-300 space-y-1.5 w-full min-w-0">
+                    <p className="font-medium">Tu encoder debe enviar a:</p>
+                    <code className="block text-orange-200 break-all">
+                      rtmp://[IP del servidor]:{rtmpPort || '1935'}/{rtmpApp || 'live'}{rtmpKey ? `/${rtmpKey}` : ''}
+                    </code>
+                    <div className="text-orange-400 space-y-0.5">
+                      <p>OBS → Servidor: <code className="text-orange-200">rtmp://IP:{rtmpPort || '1935'}/{rtmpApp || 'live'}</code></p>
+                      {rtmpKey && <p>OBS → Clave de stream: <code className="text-orange-200">{rtmpKey}</code></p>}
+                      {!rtmpKey && <p>Clave de stream: dejá vacía (o cualquier valor si el encoder lo requiere).</p>}
+                    </div>
+                  </div>
+                </div>
+              )
             )}
           </div>
 
@@ -707,15 +745,21 @@ function IngestCard({
         );
       }
       case 'RTMP_PUSH': {
-        const app = source.rtmpApp || 'live';
-        const key = source.rtmpKey || '';
-        const rtmpUrl = key
-          ? `rtmp://[servidor]:${source.rtmpPort ?? 1935}/${app}/${key}`
-          : `rtmp://[servidor]:${source.rtmpPort ?? 1935}/${app}`;
+        const host = source.rtmpHost || '';
+        const app  = source.rtmpApp  || 'live';
+        const key  = source.rtmpKey  || '';
+        const path = key ? `/${app}/${key}` : `/${app}`;
+        const rtmpUrl = host
+          ? `rtmp://${host}:${source.rtmpPort ?? 1935}${path}`           // pull
+          : `rtmp://[servidor]:${source.rtmpPort ?? 1935}${path}`;       // push
+        const copyUrl = host
+          ? rtmpUrl
+          : rtmpUrl.replace('[servidor]', '[IP_SERVIDOR]');
         return (
           <div className="flex items-center gap-1.5 min-w-0">
+            {host && <span className="text-xs px-1.5 py-0.5 rounded bg-orange-500/15 text-orange-400 font-medium flex-shrink-0">PULL</span>}
             <span className="text-slate-400 font-mono text-xs truncate">{rtmpUrl}</span>
-            <CopyBtn text={rtmpUrl.replace('[servidor]', '[IP_SERVIDOR]')} />
+            <CopyBtn text={copyUrl} />
           </div>
         );
       }

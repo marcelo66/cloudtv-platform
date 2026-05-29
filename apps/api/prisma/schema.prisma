@@ -247,10 +247,11 @@ model IngestSource {
   srtPassphrase String?  @map("srt_passphrase")
   // SRT Stream ID — para servidores que enrutan por stream ID (ej: Haivision, SRT Hub)
   srtStreamId   String?  @map("srt_stream_id")
-  // RTMP Push entrante
+  // RTMP (Push entrante o Pull desde fuente externa)
+  rtmpHost      String?  @map("rtmp_host")   // Host/IP del servidor RTMP remoto. Vacío = escucha push entrante (encoder conecta al servidor). Con valor = pull (el servidor conecta a la fuente externa).
   rtmpPort      Int?     @map("rtmp_port")   // Puerto RTMP (default 1935)
-  rtmpApp       String?  @map("rtmp_app")    // Nombre de app RTMP (default "live"). El encoder envía a rtmp://[servidor]:PORT/APP/KEY
-  rtmpKey       String?  @map("rtmp_key")    // Stream key del encoder (opcional)
+  rtmpApp       String?  @map("rtmp_app")    // Nombre de app RTMP (default "live")
+  rtmpKey       String?  @map("rtmp_key")    // Stream key (opcional)
   // Estado actual
   status    IngestStatus @default(IDLE)
   createdAt DateTime     @default(now()) @map("created_at")

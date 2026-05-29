@@ -34,20 +34,28 @@ export class CreateIngestSourceDto {
   @IsString() @IsOptional() @MaxLength(512)
   srtStreamId?: string;
 
-  // ── RTMP Push entrante ──────────────────────────────────────────
+  // ── RTMP (Push entrante o Pull desde fuente externa) ───────────
+  /**
+   * Host/IP del servidor RTMP remoto.
+   * - Vacío → modo Push: el servidor escucha conexiones entrantes del encoder.
+   * - Con valor → modo Pull: el servidor se conecta a la fuente RTMP externa.
+   * Ejemplos: "stmvideo6.livecastv.com", "192.168.1.10"
+   */
+  @IsString() @IsOptional() @MaxLength(253)
+  rtmpHost?: string;
+
   @IsInt() @Min(1) @Max(65535) @IsOptional()
   rtmpPort?: number;
 
   /**
    * Nombre de la aplicación RTMP (el segmento tras el puerto).
-   * El encoder debe enviar a rtmp://[servidor]:PORT/APP/KEY
-   * Ejemplos: "live", "stream", "broadcast", "app"
+   * Ejemplos: "live", "stream", "broadcast"
    * Por defecto: "live"
    */
   @IsString() @IsOptional() @MaxLength(128)
   rtmpApp?: string;
 
-  /** Stream key (nombre del stream). Opcional — depende del encoder. */
+  /** Stream key (nombre del stream). Opcional. */
   @IsString() @IsOptional() @MaxLength(128)
   rtmpKey?: string;
 }
@@ -70,6 +78,9 @@ export class UpdateIngestSourceDto {
 
   @IsString() @IsOptional() @MaxLength(512)
   srtStreamId?: string;
+
+  @IsString() @IsOptional() @MaxLength(253)
+  rtmpHost?: string;
 
   @IsInt() @Min(1) @Max(65535) @IsOptional()
   rtmpPort?: number;

@@ -1497,13 +1497,22 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         const port = (source.rtmpPort as number | null) ?? 1935;
         const app  = (source.rtmpApp  as string | null)?.trim() || 'live';
         const key  = (source.rtmpKey  as string | null)?.trim() || '';
-        // La URL de escucha incluye el app, y la key solo si está definida
-        const rtmpListenUrl = key
-          ? `rtmp://0.0.0.0:${port}/${app}/${key}`
-          : `rtmp://0.0.0.0:${port}/${app}`;
-        this.log(session, `INGEST: RTMP Push → escuchando en ${rtmpListenUrl}`);
-        inputArgs = ['-listen', '1', '-i', rtmpListenUrl];
-        waitMaxMs = 0;
+        const host = (source.rtmpHost as string | null)?.trim() || '';
+
+        const rtmpPath = key ? `/${app}/${key}` : `/${app}`;
+
+        if (host) {
+          // ── Pull: el servidor conecta a la fuente RTMP externa ───
+          const rtmpPullUrl = `rtmp://${host}:${port}${rtmpPath}`;
+          this.log(session, `INGEST: RTMP Pull → conectando a ${rtmpPullUrl}`);
+          inputArgs = ['-i', rtmpPullUrl];
+        } else {
+          // ── Push: el servidor escucha conexiones entrantes ───────
+          const rtmpListenUrl = `rtmp://0.0.0.0:${port}${rtmpPath}`;
+          this.log(session, `INGEST: RTMP Push → escuchando en ${rtmpListenUrl}`);
+          inputArgs = ['-listen', '1', '-i', rtmpListenUrl];
+          waitMaxMs = 0;
+        }
         break;
       }
 

@@ -17,6 +17,7 @@ export interface IngestSource {
   srtLatency:    number | null;
   srtPassphrase: string | null;
   srtStreamId:   string | null;
+  rtmpHost:      string | null;
   rtmpPort:      number | null;
   rtmpApp:       string | null;
   rtmpKey:       string | null;
@@ -33,6 +34,7 @@ export interface CreateIngestInput {
   srtLatency?:    number;
   srtPassphrase?: string;
   srtStreamId?:   string;   // Stream ID para servidores SRT con enrutamiento
+  rtmpHost?:      string;   // Servidor RTMP remoto (pull). Vacío = escuchar push entrante
   rtmpPort?:      number;
   rtmpApp?:       string;   // Nombre de app RTMP (default "live")
   rtmpKey?:       string;
@@ -45,6 +47,7 @@ export interface UpdateIngestInput {
   srtLatency?:    number;
   srtPassphrase?: string;
   srtStreamId?:   string;
+  rtmpHost?:      string;
   rtmpPort?:      number;
   rtmpApp?:       string;
   rtmpKey?:       string;
