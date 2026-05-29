@@ -17,16 +17,39 @@ interface VideoCardProps {
 
 export function VideoCard({ video, folders = [], onUpdate, onDelete }: VideoCardProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+
+  // ── Edición de título ──────────────────────────────────────
   const [editing, setEditing] = useState(false);
   const [editTitle, setEditTitle] = useState(video.title);
-  const [editingFolder, setEditingFolder] = useState(false);
-  const [folderInput, setFolderInput] = useState(video.folder ?? '');
 
   const handleSaveTitle = () => {
     if (editTitle.trim() && editTitle !== video.title) {
       onUpdate(video.id, { title: editTitle.trim() });
     }
     setEditing(false);
+  };
+
+  const handleTitleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') handleSaveTitle();
+    if (e.key === 'Escape') { setEditTitle(video.title); setEditing(false); }
+  };
+
+  // ── Edición de carpeta ─────────────────────────────────────
+  const [editingFolder, setEditingFolder] = useState(false);
+  // folderInput: la carpeta que se va a guardar (seleccionada o escrita)
+  const [folderInput, setFolderInput] = useState('');
+  // customMode: el usuario quiere escribir una carpeta nueva
+  const [customMode, setCustomMode] = useState(false);
+
+  const openFolderEditor = () => {
+    const currentFolder = video.folder ?? '';
+    setFolderInput(currentFolder);
+    // Entrar en customMode si no hay carpetas existentes O si la carpeta actual
+    // no está en la lista (fue borrada por otro video, por ejemplo)
+    const inList = currentFolder && folders.includes(currentFolder);
+    setCustomMode(!folders.length || (!inList && !!currentFolder));
+    setEditingFolder(true);
+    setMenuOpen(false);
   };
 
   const handleSaveFolder = () => {
@@ -37,14 +60,9 @@ export function VideoCard({ video, folders = [], onUpdate, onDelete }: VideoCard
     setEditingFolder(false);
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') handleSaveTitle();
-    if (e.key === 'Escape') { setEditTitle(video.title); setEditing(false); }
-  };
-
   const handleFolderKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') handleSaveFolder();
-    if (e.key === 'Escape') { setFolderInput(video.folder ?? ''); setEditingFolder(false); }
+    if (e.key === 'Escape') { setEditingFolder(false); }
   };
 
   const isProcessing = video.status === 'PROCESSING' || video.status === 'PENDING';
@@ -79,7 +97,7 @@ export function VideoCard({ video, folders = [], onUpdate, onDelete }: VideoCard
           </div>
         )}
 
-        {/* Folder badge en thumbnail */}
+        {/* Folder badge */}
         {video.folder && (
           <div className="absolute top-2 left-2 flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-sm text-[10px] text-slate-300 font-medium">
             <Folder className="w-2.5 h-2.5 text-brand-400" />
@@ -97,7 +115,7 @@ export function VideoCard({ video, folders = [], onUpdate, onDelete }: VideoCard
 
       {/* Info */}
       <div className="p-3">
-        {/* Title */}
+        {/* Title row */}
         <div className="flex items-start gap-2 mb-2">
           {editing ? (
             <div className="flex-1 flex items-center gap-1">
@@ -105,14 +123,17 @@ export function VideoCard({ video, folders = [], onUpdate, onDelete }: VideoCard
                 autoFocus
                 value={editTitle}
                 onChange={(e) => setEditTitle(e.target.value)}
-                onKeyDown={handleKeyDown}
+                onKeyDown={handleTitleKeyDown}
                 onBlur={handleSaveTitle}
                 className="flex-1 text-sm font-medium bg-surface-600 border border-brand-500/50 rounded px-2 py-0.5 text-white focus:outline-none"
               />
               <button onClick={handleSaveTitle} className="text-green-400 hover:text-green-300 p-0.5">
                 <Check className="w-3.5 h-3.5" />
               </button>
-              <button onClick={() => { setEditTitle(video.title); setEditing(false); }} className="text-slate-500 hover:text-slate-300 p-0.5">
+              <button
+                onClick={() => { setEditTitle(video.title); setEditing(false); }}
+                className="text-slate-500 hover:text-slate-300 p-0.5"
+              >
                 <X className="w-3.5 h-3.5" />
               </button>
             </div>
@@ -126,7 +147,7 @@ export function VideoCard({ video, folders = [], onUpdate, onDelete }: VideoCard
             </p>
           )}
 
-          {/* Menu */}
+          {/* Kebab menu */}
           <div className="relative flex-shrink-0">
             <button
               onClick={() => setMenuOpen(!menuOpen)}
@@ -147,11 +168,7 @@ export function VideoCard({ video, folders = [], onUpdate, onDelete }: VideoCard
                     Renombrar
                   </button>
                   <button
-                    onClick={() => {
-                      setFolderInput(video.folder ?? '');
-                      setEditingFolder(true);
-                      setMenuOpen(false);
-                    }}
+                    onClick={openFolderEditor}
                     className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-300 hover:bg-white/5 hover:text-white transition-colors"
                   >
                     <FolderInput className="w-3.5 h-3.5" />
@@ -170,39 +187,65 @@ export function VideoCard({ video, folders = [], onUpdate, onDelete }: VideoCard
           </div>
         </div>
 
-        {/* Folder editor inline */}
+        {/* ── Editor de carpeta inline ─────────────────────────── */}
         {editingFolder && (
-          <div className="mb-2">
-            <div className="flex gap-1">
+          <div className="mb-2 space-y-1.5">
+
+            {/* Selector de carpetas existentes (se muestra solo si hay carpetas) */}
+            {folders.length > 0 && (
               <select
-                autoFocus
-                value={folders.includes(folderInput) ? folderInput : (folderInput ? '__custom__' : '')}
+                value={customMode ? '__custom__' : folderInput}
                 onChange={(e) => {
-                  if (e.target.value !== '__custom__') setFolderInput(e.target.value);
+                  if (e.target.value === '__custom__') {
+                    // El usuario quiere escribir una nueva
+                    setCustomMode(true);
+                    setFolderInput('');
+                  } else {
+                    // El usuario eligió una carpeta existente o "Sin carpeta"
+                    setCustomMode(false);
+                    setFolderInput(e.target.value);
+                  }
                 }}
-                className="flex-1 px-2 py-1 rounded text-xs bg-surface-600 border border-brand-500/50 text-white focus:outline-none"
+                className="w-full px-2 py-1.5 rounded text-xs bg-surface-600 border border-brand-500/50 text-white focus:outline-none"
               >
                 <option value="">— Sin carpeta —</option>
-                {folders.map((f) => <option key={f} value={f}>{f}</option>)}
-                <option value="__custom__">✏ Escribir nombre...</option>
+                {folders.map((f) => (
+                  <option key={f} value={f}>{f}</option>
+                ))}
+                <option value="__custom__">✏ Nueva carpeta...</option>
               </select>
-              <button onClick={handleSaveFolder} className="text-green-400 hover:text-green-300 p-1 flex-shrink-0">
-                <Check className="w-3.5 h-3.5" />
-              </button>
-              <button onClick={() => setEditingFolder(false)} className="text-slate-500 hover:text-slate-300 p-1 flex-shrink-0">
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-            {(!folders.includes(folderInput) && folderInput) || !folders.length ? (
+            )}
+
+            {/* Input de texto: visible cuando customMode=true o cuando no hay carpetas */}
+            {(customMode || !folders.length) && (
               <input
+                autoFocus
                 value={folderInput}
                 onChange={(e) => setFolderInput(e.target.value)}
                 onKeyDown={handleFolderKeyDown}
-                placeholder="Nombre de carpeta"
+                placeholder="Nombre de la carpeta"
                 maxLength={100}
-                className="mt-1 w-full px-2 py-1 rounded text-xs bg-surface-600 border border-brand-500/50 text-white placeholder-slate-600 focus:outline-none"
+                className="w-full px-2 py-1.5 rounded text-xs bg-surface-600 border border-brand-500/50 text-white placeholder-slate-600 focus:outline-none"
               />
-            ) : null}
+            )}
+
+            {/* Botones guardar / cancelar */}
+            <div className="flex justify-end gap-1">
+              <button
+                onClick={handleSaveFolder}
+                className="flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium text-green-400 hover:text-green-300 hover:bg-green-400/10 transition-colors"
+              >
+                <Check className="w-3 h-3" />
+                Guardar
+              </button>
+              <button
+                onClick={() => setEditingFolder(false)}
+                className="flex items-center gap-1 px-2.5 py-1 rounded text-xs text-slate-500 hover:text-slate-300 hover:bg-white/5 transition-colors"
+              >
+                <X className="w-3 h-3" />
+                Cancelar
+              </button>
+            </div>
           </div>
         )}
 
