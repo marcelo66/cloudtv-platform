@@ -1,7 +1,7 @@
 import { Controller, Delete, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { YoutubeAuthService } from './youtube-auth.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 
 @Controller('youtube-auth')
 @UseGuards(JwtAuthGuard)
