@@ -1492,7 +1492,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     if (ytDlpProc) {
       (ytDlpProc.stdout as NodeJS.ReadableStream).pipe(proc.stdin as NodeJS.WritableStream);
 
-      ytDlpProc.stderr.on('data', (chunk: Buffer) => {
+      ytDlpProc.stderr?.on('data', (chunk: Buffer) => {
         chunk.toString().split('\n').forEach(l => {
           const t = l.trim();
           if (t) this.log(session, `yt-dlp: ${t}`);
@@ -1526,7 +1526,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
     let spawnedAt = Date.now();
 
-    proc.stderr.on('data', (chunk: Buffer) => {
+    proc.stderr?.on('data', (chunk: Buffer) => {
       chunk.toString().split('\n').forEach(l => {
         const t = l.trim();
         if (t) this.log(session, `ingest: ${t}`);
