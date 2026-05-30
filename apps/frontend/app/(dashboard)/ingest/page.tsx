@@ -45,7 +45,6 @@ import {
   useYoutubeStartFlow,
   useYoutubeDevicePoll,
   useYoutubeDisconnect,
-  type DeviceFlowSession,
 } from '@/hooks/useYoutubeAuth';
 
 // ─── Helpers ──────────────────────────────────────────────────
@@ -69,31 +68,38 @@ function CopyBtn({ text }: { text: string }) {
 }
 
 // ─── Device Flow Modal ────────────────────────────────────────
+// Recibe el sessionId y hace polling hasta obtener URL+código (status=url_ready)
+// o detectar error/autorización.
 
 interface DeviceFlowModalProps {
-  session: DeviceFlowSession;
-  onClose: () => void;
+  sessionId: string;
+  onClose:   () => void;
   onSuccess: () => void;
 }
 
-function DeviceFlowModal({ session, onClose, onSuccess }: DeviceFlowModalProps) {
+function DeviceFlowModal({ sessionId, onClose, onSuccess }: DeviceFlowModalProps) {
   const [copied, setCopied] = useState(false);
-  const { data: pollData } = useYoutubeDevicePoll(session.sessionId);
-  const calledSuccess = useRef(false);
+  const { data: pollData }  = useYoutubeDevicePoll(sessionId);
+  const calledSuccess       = useRef(false);
 
   // Detectar autorización exitosa
   useEffect(() => {
     if (pollData?.status === 'authorized' && !calledSuccess.current) {
       calledSuccess.current = true;
-      setTimeout(onSuccess, 1800); // pequeño delay para mostrar el tick
+      setTimeout(onSuccess, 1800);
     }
   }, [pollData?.status, onSuccess]);
 
   const authorized = pollData?.status === 'authorized';
   const hasError   = pollData?.status === 'error';
+  const urlReady   = (pollData?.status === 'url_ready' || pollData?.status === 'authorized') &&
+                     !!pollData?.authUrl && !!pollData?.userCode;
+
+  const authUrl  = pollData?.authUrl  ?? '';
+  const userCode = pollData?.userCode ?? '';
 
   const copyCode = () => {
-    navigator.clipboard.writeText(session.userCode).then(() => {
+    navigator.clipboard.writeText(userCode).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     });
@@ -111,7 +117,9 @@ function DeviceFlowModal({ session, onClose, onSuccess }: DeviceFlowModalProps) 
             </div>
             <div>
               <p className="text-sm font-semibold text-white">Conectar cuenta de YouTube</p>
-              <p className="text-xs text-slate-400">Autorización en 3 pasos</p>
+              <p className="text-xs text-slate-400">
+                {authorized ? 'Cuenta conectada' : urlReady ? 'Autorización en 3 pasos' : 'Iniciando flujo...'}
+              </p>
             </div>
           </div>
           {!authorized && (
@@ -136,6 +144,7 @@ function DeviceFlowModal({ session, onClose, onSuccess }: DeviceFlowModalProps) 
                 </p>
               </div>
             </div>
+
           ) : hasError ? (
             /* ── Estado: error ───────────────────────────────────── */
             <div className="flex flex-col items-center gap-3 py-4 text-center">
@@ -144,7 +153,7 @@ function DeviceFlowModal({ session, onClose, onSuccess }: DeviceFlowModalProps) 
               </div>
               <div>
                 <p className="text-base font-semibold text-white">Error en la autorización</p>
-                <p className="text-sm text-slate-400 mt-1">
+                <p className="text-sm text-slate-400 mt-1 break-words">
                   {pollData?.errorMessage ?? 'Ocurrió un error. Intentá de nuevo.'}
                 </p>
               </div>
@@ -155,8 +164,25 @@ function DeviceFlowModal({ session, onClose, onSuccess }: DeviceFlowModalProps) 
                 Cerrar
               </button>
             </div>
+
+          ) : !urlReady ? (
+            /* ── Estado: esperando URL+código de yt-dlp ─────────── */
+            <div className="flex flex-col items-center gap-3 py-6 text-center">
+              <Loader2 className="w-8 h-8 text-brand-400 animate-spin" />
+              <div>
+                <p className="text-sm font-semibold text-white">Iniciando sesión con Google...</p>
+                <p className="text-xs text-slate-400 mt-1">Obteniendo código de autorización. Puede tardar unos segundos.</p>
+              </div>
+              <button
+                onClick={onClose}
+                className="mt-2 px-4 py-2 rounded-xl text-sm font-medium text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
+              >
+                Cancelar
+              </button>
+            </div>
+
           ) : (
-            /* ── Estado: pendiente ───────────────────────────────── */
+            /* ── Estado: URL+código listos ───────────────────────── */
             <>
               {/* Paso 1 */}
               <div className="flex gap-3">
@@ -164,15 +190,15 @@ function DeviceFlowModal({ session, onClose, onSuccess }: DeviceFlowModalProps) 
                 <div className="flex-1">
                   <p className="text-sm font-medium text-white mb-1.5">Abrir la página de activación</p>
                   <a
-                    href={session.authUrl}
+                    href={authUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-sm font-medium text-white transition-colors"
                   >
                     <ExternalLink className="w-3.5 h-3.5" />
-                    Abrir {session.authUrl.replace('https://', '')}
+                    Abrir {authUrl.replace('https://', '')}
                   </a>
-                  <p className="text-xs text-slate-500 mt-1">O copiá la URL: <span className="text-slate-400 font-mono">{session.authUrl}</span></p>
+                  <p className="text-xs text-slate-500 mt-1">O copiá: <span className="text-slate-400 font-mono">{authUrl}</span></p>
                 </div>
               </div>
 
@@ -183,7 +209,7 @@ function DeviceFlowModal({ session, onClose, onSuccess }: DeviceFlowModalProps) 
                   <p className="text-sm font-medium text-white mb-1.5">Ingresar este código</p>
                   <div className="flex items-center gap-2">
                     <div className="flex-1 bg-surface-700 border border-surface-500 rounded-xl px-4 py-2.5 font-mono text-xl font-bold text-white tracking-widest text-center">
-                      {session.userCode}
+                      {userCode}
                     </div>
                     <button
                       onClick={copyCode}
@@ -233,17 +259,18 @@ function YoutubeConnectCard() {
   const { data: authStatus, isLoading, refetch } = useYoutubeAuthStatus();
   const startFlow   = useYoutubeStartFlow();
   const disconnect  = useYoutubeDisconnect();
-  const [flowSession, setFlowSession] = useState<DeviceFlowSession | null>(null);
+  // Solo almacenamos el sessionId — el URL+código llegan via polling
+  const [pollSessionId, setPollSessionId] = useState<string | null>(null);
 
   const handleConnect = async () => {
     try {
-      const session = await startFlow.mutateAsync();
-      setFlowSession(session);
+      const { sessionId } = await startFlow.mutateAsync();
+      setPollSessionId(sessionId);
     } catch { /* toast shown by mutation */ }
   };
 
   const handleSuccess = () => {
-    setFlowSession(null);
+    setPollSessionId(null);
     refetch();
     toast.success('¡Cuenta de YouTube conectada! Las fuentes YouTube ya no necesitan cookies.');
   };
@@ -317,11 +344,11 @@ function YoutubeConnectCard() {
         </div>
       </div>
 
-      {/* Modal de Device Flow */}
-      {flowSession && (
+      {/* Modal de Device Flow — se abre en cuanto tenemos sessionId */}
+      {pollSessionId && (
         <DeviceFlowModal
-          session={flowSession}
-          onClose={() => setFlowSession(null)}
+          sessionId={pollSessionId}
+          onClose={() => setPollSessionId(null)}
           onSuccess={handleSuccess}
         />
       )}

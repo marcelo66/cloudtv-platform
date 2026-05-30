@@ -10,16 +10,21 @@ export interface YoutubeAuthStatus {
   since:     string | null;
 }
 
-export interface DeviceFlowSession {
+/** Respuesta inmediata de POST /start — sólo el sessionId */
+export interface DeviceFlowStart {
   sessionId: string;
-  authUrl:   string;
-  userCode:  string;
 }
 
-export type DeviceFlowStatus = 'pending' | 'authorized' | 'error' | 'not_found';
+/** Alias para compatibilidad con imports existentes en page.tsx */
+export type DeviceFlowSession = DeviceFlowStart;
 
+export type DeviceFlowStatus = 'pending' | 'url_ready' | 'authorized' | 'error' | 'not_found';
+
+/** Respuesta del polling — incluye authUrl+userCode cuando status=url_ready */
 export interface DeviceFlowPoll {
   status:        DeviceFlowStatus;
+  authUrl?:      string;
+  userCode?:     string;
   errorMessage?: string;
 }
 
@@ -52,9 +57,9 @@ export function useYoutubeDevicePoll(sessionId: string | null) {
 
 // ─── Mutations ────────────────────────────────────────────────
 
-/** Iniciar el Device Authorization Flow */
+/** Iniciar el Device Authorization Flow — devuelve { sessionId } inmediatamente */
 export function useYoutubeStartFlow() {
-  return useMutation<DeviceFlowSession>({
+  return useMutation<DeviceFlowStart>({
     mutationFn: async () => {
       const { data } = await apiClient.post('/youtube-auth/start');
       return data;
