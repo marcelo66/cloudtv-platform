@@ -1416,8 +1416,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
         const ytArgs: string[] = [
           '--no-playlist',
-          // Node.js como JS runtime para generar po_tokens
+          // Node.js como JS runtime para resolver el "n challenge" de YouTube.
+          // --remote-components ejs:github descarga el solver de JS desde GitHub
+          // (requerido desde 2025 para que yt-dlp pueda obtener formatos de video).
           '--js-runtimes', 'node',
+          '--remote-components', 'ejs:github',
           '-f', 'best[height<=720]/best',
           '-o', '-',
         ];
