@@ -28,7 +28,7 @@ RUN apt-get update && \
 # El plugin yt-dlp-oauth2 de coletdjnz restaura el Device Authorization Flow con
 # client IDs actualizados, eludiendo la revocación de los IDs internos de yt-dlp.
 RUN pip3 install --break-system-packages yt-dlp \
-    "yt-dlp-oauth2 @ https://github.com/coletdjnz/yt-dlp-oauth2/archive/refs/heads/master.zip"
+    "yt-dlp-oauth2 @ https://github.com/coletdjnz/yt-dlp-oauth2/archive/refs/heads/main.zip"
 WORKDIR /app
 ENV NODE_ENV=production
 
