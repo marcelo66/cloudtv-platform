@@ -1,7 +1,6 @@
 import {
   Injectable,
   Logger,
-  InternalServerErrorException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { spawn, ChildProcess } from 'child_process';
@@ -32,6 +31,7 @@ interface AuthSession {
   userId:    string;
   cacheDir:  string;
   pollTimer: ReturnType<typeof setInterval> | null;
+  outputBuf: string;   // ← output acumulado de yt-dlp para diagnóstico
   errorMsg?: string;
 }
 
@@ -95,14 +95,13 @@ export class YoutubeAuthService {
       userId,
       cacheDir,
       pollTimer: null,
+      outputBuf: '',
     };
     this.sessions.set(sessionId, session);
 
-    let outputBuf = '';
-
     const onData = (chunk: Buffer) => {
       const text = chunk.toString();
-      outputBuf += text;
+      session.outputBuf += text;
       this.logger.verbose(`[yt-dlp oauth] ${text.trim()}`);
 
       // Parseo flexible de distintos formatos que emite yt-dlp:
@@ -110,14 +109,15 @@ export class YoutubeAuthService {
       // "visit: https://www.google.com/device"
       // "authorization code: XXXX-XXXX"
       if (!session.authUrl) {
+        const buf = session.outputBuf;
         const urlMatch =
-          outputBuf.match(/(?:open|visit)[^\n]*(https?:\/\/www\.google\.com\/device[^\s\n]*)/i) ??
-          outputBuf.match(/(https?:\/\/www\.google\.com\/device[^\s\n]*)/i) ??
-          outputBuf.match(/(?:open|visit)[^\n]*(https?:\/\/accounts\.google\.com[^\s\n]*)/i);
+          buf.match(/(?:open|visit)[^\n]*(https?:\/\/www\.google\.com\/device[^\s\n]*)/i) ??
+          buf.match(/(https?:\/\/www\.google\.com\/device[^\s\n]*)/i) ??
+          buf.match(/(?:open|visit)[^\n]*(https?:\/\/accounts\.google\.com[^\s\n]*)/i);
 
         const codeMatch =
-          outputBuf.match(/(?:enter|code)[:\s]+([A-Z0-9]{4}-[A-Z0-9]{4})/i) ??
-          outputBuf.match(/\b([A-Z]{4}-[A-Z]{4})\b/);
+          buf.match(/(?:enter|code)[:\s]+([A-Z0-9]{4}-[A-Z0-9]{4})/i) ??
+          buf.match(/\b([A-Z]{4}-[A-Z]{4})\b/);
 
         if (urlMatch && codeMatch) {
           session.authUrl  = urlMatch[1].trim();
@@ -138,21 +138,23 @@ export class YoutubeAuthService {
     proc.stderr?.on('data', onData);
 
     proc.on('close', async (code) => {
-      this.logger.log(`[YoutubeAuth] yt-dlp cerró con código ${code} | outputBuf: ${outputBuf.slice(-300)}`);
+      const tail = session.outputBuf.slice(-500);
+      this.logger.log(`[YoutubeAuth] yt-dlp cerró con código ${code} | tail: ${tail}`);
       if (session.pollTimer) { clearInterval(session.pollTimer); session.pollTimer = null; }
 
+      // Chequeo final del filesystem — captura el token si yt-dlp lo guardó
+      // justo antes de salir (o si el timer aún no había detectado el archivo).
       if (session.status === 'url_ready' || session.status === 'pending') {
-        // Chequeo final del filesystem por si el token apareció justo al cierre
         await this.checkForToken(session, sessionId, userId, true);
       }
 
-      if (session.status === 'pending') {
-        session.status   = 'error';
-        // Incluir los últimos 300 chars del output para diagnóstico
-        const hint = outputBuf.slice(-300).trim().replace(/\n+/g, ' ');
+      // Si sigue sin token después del chequeo final → error con detalle del output
+      if (session.status === 'url_ready' || session.status === 'pending') {
+        session.status = 'error';
+        const hint = session.outputBuf.slice(-400).trim().replace(/\n+/g, ' | ');
         session.errorMsg = hint
-          ? `yt-dlp salió (código ${code}): ${hint}`
-          : `yt-dlp salió sin emitir código de dispositivo (código ${code}). ¿Versión compatible instalada?`;
+          ? `yt-dlp salió (código ${code}) sin guardar token: ${hint}`
+          : `yt-dlp salió (código ${code}) sin generar token OAuth2. ¿El plugin oauth2 está instalado?`;
       }
 
       // Limpiar en 5 min para dar tiempo al frontend de consultar el estado final
@@ -167,41 +169,53 @@ export class YoutubeAuthService {
         : err.message;
     });
 
-    // Timeout: si en 90s no aparece el código, marcar error
+    // Timeout: si en 120s el usuario no autorizó, marcar error
     setTimeout(() => {
-      if (session.status === 'pending') {
+      if (session.status === 'pending' || session.status === 'url_ready') {
         session.status   = 'error';
-        session.errorMsg = 'Timeout (90s): yt-dlp no emitió el código de dispositivo. ¿Versión compatible?';
+        session.errorMsg = 'Timeout (120s): el usuario no autorizó a tiempo o yt-dlp no respondió.';
         try { proc.kill('SIGTERM'); } catch {}
       }
-    }, 90_000);
+    }, 120_000);
 
     // Retornar sessionId INMEDIATAMENTE — el URL/código llegan via polling
     return { sessionId };
   }
 
   // ── Poll del filesystem por el token OAuth2 ───────────────────
+  // IMPORTANTE: se llama tanto con status='pending' como 'url_ready'.
+  // El guard solo salta si ya se autorizó o hay un error definitivo.
   private async checkForToken(
     session:   AuthSession,
     sessionId: string,
     userId:    string,
     final      = false,
   ) {
-    if (session.status !== 'pending') return;
+    // Solo procesamos si todavía estamos esperando el token
+    if (session.status === 'authorized' || session.status === 'error') return;
+
     try {
-      const oauth2Dir = path.join(session.cacheDir, 'youtube-oauth2');
-      const entries   = await fs.readdir(oauth2Dir);
-      const jsonFiles = entries.filter(f => f.endsWith('.json'));
+      // Escanear el cacheDir completo recursivamente buscando cualquier .json
+      // (por si yt-dlp guarda el token en un subdirectorio distinto al esperado)
+      const jsonFiles = await this.findJsonFilesRecursive(session.cacheDir);
 
       if (jsonFiles.length === 0) {
-        if (final) { session.status = 'error'; session.errorMsg = 'No se generó token OAuth2'; }
+        if (final) {
+          const hint = session.outputBuf.slice(-400).trim().replace(/\n+/g, ' | ');
+          session.status   = 'error';
+          session.errorMsg = hint
+            ? `No se generó token OAuth2. yt-dlp dijo: ${hint}`
+            : 'No se generó token OAuth2. Verificá que el plugin yt-dlp-oauth2 esté instalado.';
+        }
         return;
       }
 
-      // Leer todos los archivos .json del directorio oauth2
+      // Leer todos los .json encontrados y guardar en DB
       const files: Record<string, string> = {};
-      for (const fname of jsonFiles) {
-        files[fname] = await fs.readFile(path.join(oauth2Dir, fname), 'utf8');
+      for (const fpath of jsonFiles) {
+        const fname = path.relative(session.cacheDir, fpath);
+        files[fname] = await fs.readFile(fpath, 'utf8');
+        this.logger.log(`[YoutubeAuth] Token encontrado: ${fname}`);
       }
 
       if (session.pollTimer) { clearInterval(session.pollTimer); session.pollTimer = null; }
@@ -210,17 +224,41 @@ export class YoutubeAuthService {
       session.status = 'authorized';
       this.logger.log(`[YoutubeAuth] ✅ Token guardado en DB para usuario ${userId}`);
 
-      // Matar yt-dlp — ya tenemos el token, no necesitamos que descargue
+      // Matar yt-dlp — ya tenemos el token
       if (!session.process.killed) {
         try { session.process.kill('SIGTERM'); } catch {}
       }
-    } catch {
-      // Dir vacío o inexistente — normal durante el polling
-      if (final && session.status === 'pending') {
-        session.status  = 'error';
-        session.errorMsg = 'No se encontró token tras completar la autorización';
+    } catch (err) {
+      // Directorio vacío o inexistente — normal durante el polling (no final)
+      this.logger.verbose(`[YoutubeAuth] checkForToken catch: ${err}`);
+      if (final) {
+        const hint = session.outputBuf.slice(-400).trim().replace(/\n+/g, ' | ');
+        session.status   = 'error';
+        session.errorMsg = hint
+          ? `Error al leer token OAuth2. yt-dlp dijo: ${hint}`
+          : 'No se encontró token tras completar la autorización.';
       }
     }
+  }
+
+  // ── Buscar archivos .json recursivamente dentro de un directorio ──
+  private async findJsonFilesRecursive(dir: string): Promise<string[]> {
+    const result: string[] = [];
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          const nested = await this.findJsonFilesRecursive(fullPath);
+          result.push(...nested);
+        } else if (entry.isFile() && entry.name.endsWith('.json')) {
+          result.push(fullPath);
+        }
+      }
+    } catch {
+      // Directorio no existe aún — normal
+    }
+    return result;
   }
 
   // ── Guardar token en DB ────────────────────────────────────────
@@ -264,24 +302,28 @@ export class YoutubeAuthService {
       return null;
     }
 
+    // Los archivos pueden estar guardados con path relativo (ej: "youtube-oauth2/token.json")
+    // o solo nombre (ej: "token.json"). Normalizar para garantizar que caigan en oauth2Dir.
     for (const [fname, content] of Object.entries(files)) {
-      await fs.writeFile(path.join(oauth2Dir, fname), content, 'utf8');
+      const targetPath = fname.includes('/')
+        ? path.join(cacheDir, fname)
+        : path.join(oauth2Dir, fname);
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await fs.writeFile(targetPath, content, 'utf8');
     }
     return cacheDir;
   }
 
   // ── Persistir token renovado en DB tras usar yt-dlp ──────────
-  // yt-dlp renueva el access_token automáticamente (usa refresh_token).
-  // Leemos el archivo actualizado y guardamos en DB para el próximo uso.
   async persistRefreshedToken(userId: string): Promise<void> {
-    const oauth2Dir = `/tmp/yt-dlp-cache-${userId}/youtube-oauth2`;
+    const cacheDir = `/tmp/yt-dlp-cache-${userId}`;
     try {
-      const entries   = await fs.readdir(oauth2Dir);
-      const jsonFiles = entries.filter(f => f.endsWith('.json'));
+      const jsonFiles = await this.findJsonFilesRecursive(cacheDir);
       if (!jsonFiles.length) return;
       const files: Record<string, string> = {};
-      for (const f of jsonFiles) {
-        files[f] = await fs.readFile(path.join(oauth2Dir, f), 'utf8');
+      for (const fpath of jsonFiles) {
+        const fname = path.relative(cacheDir, fpath);
+        files[fname] = await fs.readFile(fpath, 'utf8');
       }
       await this.prisma.youtubeCredential.update({
         where: { userId },
@@ -298,7 +340,6 @@ export class YoutubeAuthService {
     if (!sess) return;
     if (sess.pollTimer) clearInterval(sess.pollTimer);
     if (!sess.process.killed) try { sess.process.kill('SIGTERM'); } catch {}
-    // Borrar tmp en background
     fs.rm(sess.cacheDir, { recursive: true, force: true }).catch(() => {});
     this.sessions.delete(sessionId);
   }

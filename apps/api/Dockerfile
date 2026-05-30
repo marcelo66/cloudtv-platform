@@ -21,11 +21,13 @@ FROM node:20-slim AS runner
 # yt-dlp: se descarga el binario standalone para Linux x86_64 (~15 MB, Python incluido).
 # Necesario para extraer la URL directa de streams YouTube Live en el módulo de ingesta.
 RUN apt-get update && \
-    apt-get install -y ffmpeg openssl postgresql-client fonts-dejavu-core curl && \
-    curl -sSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux \
-         -o /usr/local/bin/yt-dlp && \
-    chmod a+rx /usr/local/bin/yt-dlp && \
+    apt-get install -y ffmpeg openssl postgresql-client fonts-dejavu-core curl python3 python3-pip && \
     rm -rf /var/lib/apt/lists/*
+
+# Instalar yt-dlp via pip (soporta plugins externos) + plugin oauth2 para YouTube
+# El plugin yt-dlp-oauth2 de coletdjnz restaura el Device Authorization Flow con
+# client IDs actualizados, eludiendo la revocación de los IDs internos de yt-dlp.
+RUN pip3 install --break-system-packages yt-dlp yt-dlp-oauth2
 WORKDIR /app
 ENV NODE_ENV=production
 
