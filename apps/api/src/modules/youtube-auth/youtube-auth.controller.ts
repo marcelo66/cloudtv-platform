@@ -1,4 +1,4 @@
-import { Controller, Delete, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Post, UseGuards } from '@nestjs/common';
 import { YoutubeAuthService } from './youtube-auth.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -14,19 +14,16 @@ export class YoutubeAuthController {
     return this.youtubeAuthService.getStatus(userId);
   }
 
-  /** Iniciar Device Authorization Flow — devuelve { sessionId, authUrl, userCode } */
-  @Post('start')
-  startDeviceFlow(@CurrentUser('id') userId: string) {
-    return this.youtubeAuthService.startDeviceFlow(userId);
-  }
-
-  /** Consultar estado de una sesión de auth en curso */
-  @Get('status/:sessionId')
-  pollStatus(
-    @Param('sessionId') sessionId: string,
+  /**
+   * Guardar cookies.txt exportadas desde el navegador.
+   * Body: { cookies: string }  — contenido completo del archivo cookies.txt (formato Netscape)
+   */
+  @Post('cookies')
+  uploadCookies(
+    @Body('cookies') cookies: string,
     @CurrentUser('id') userId: string,
   ) {
-    return this.youtubeAuthService.pollStatus(sessionId, userId);
+    return this.youtubeAuthService.saveCookies(userId, cookies);
   }
 
   /** Desconectar cuenta y eliminar credenciales */

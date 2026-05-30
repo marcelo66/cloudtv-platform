@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Radio,
   Plus,
@@ -20,7 +20,6 @@ import {
   ExternalLink,
   LogOut,
   CheckCircle2,
-  XCircle,
 } from 'lucide-react';
 import { Header } from '@/components/dashboard/Header';
 import apiClient from '@/lib/api-client';
@@ -42,8 +41,7 @@ import {
 } from '@/hooks/useIngest';
 import {
   useYoutubeAuthStatus,
-  useYoutubeStartFlow,
-  useYoutubeDevicePoll,
+  useYoutubeUploadCookies,
   useYoutubeDisconnect,
 } from '@/hooks/useYoutubeAuth';
 
@@ -67,47 +65,40 @@ function CopyBtn({ text }: { text: string }) {
   );
 }
 
-// ─── Device Flow Modal ────────────────────────────────────────
-// Recibe el sessionId y hace polling hasta obtener URL+código (status=url_ready)
-// o detectar error/autorización.
+// ─── Cookies Upload Modal ─────────────────────────────────────
+// El usuario exporta cookies.txt desde su navegador con una extensión
+// y las sube aquí para que yt-dlp pueda autenticarse en YouTube.
 
-interface DeviceFlowModalProps {
-  sessionId: string;
+interface CookiesUploadModalProps {
   onClose:   () => void;
   onSuccess: () => void;
 }
 
-function DeviceFlowModal({ sessionId, onClose, onSuccess }: DeviceFlowModalProps) {
-  const [copied, setCopied] = useState(false);
-  const { data: pollData }  = useYoutubeDevicePoll(sessionId);
-  const calledSuccess       = useRef(false);
+function CookiesUploadModal({ onClose, onSuccess }: CookiesUploadModalProps) {
+  const [cookiesText, setCookiesText] = useState('');
+  const [fileName,    setFileName]    = useState('');
+  const uploadMut = useYoutubeUploadCookies();
 
-  // Detectar autorización exitosa
-  useEffect(() => {
-    if (pollData?.status === 'authorized' && !calledSuccess.current) {
-      calledSuccess.current = true;
-      setTimeout(onSuccess, 1800);
-    }
-  }, [pollData?.status, onSuccess]);
+  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = (ev) => setCookiesText((ev.target?.result as string) ?? '');
+    reader.readAsText(file);
+  };
 
-  const authorized = pollData?.status === 'authorized';
-  const hasError   = pollData?.status === 'error';
-  const urlReady   = (pollData?.status === 'url_ready' || pollData?.status === 'authorized') &&
-                     !!pollData?.authUrl && !!pollData?.userCode;
-
-  const authUrl  = pollData?.authUrl  ?? '';
-  const userCode = pollData?.userCode ?? '';
-
-  const copyCode = () => {
-    navigator.clipboard.writeText(userCode).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
+  const handleUpload = async () => {
+    if (!cookiesText.trim()) return;
+    try {
+      await uploadMut.mutateAsync(cookiesText);
+      onSuccess();
+    } catch { /* toast shown by mutation */ }
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-      <div className="w-full max-w-md bg-surface-800 rounded-2xl border border-white/10 shadow-2xl">
+      <div className="w-full max-w-lg bg-surface-800 rounded-2xl border border-white/10 shadow-2xl">
 
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
@@ -116,137 +107,107 @@ function DeviceFlowModal({ sessionId, onClose, onSuccess }: DeviceFlowModalProps
               <Youtube className="w-4 h-4 text-red-400" />
             </div>
             <div>
-              <p className="text-sm font-semibold text-white">Conectar cuenta de YouTube</p>
-              <p className="text-xs text-slate-400">
-                {authorized ? 'Cuenta conectada' : urlReady ? 'Autorización en 3 pasos' : 'Iniciando flujo...'}
+              <p className="text-sm font-semibold text-white">Autenticación YouTube</p>
+              <p className="text-xs text-slate-400">Subir cookies exportadas desde el navegador</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="px-6 py-5 space-y-4">
+
+          {/* Paso 1 */}
+          <div className="flex gap-3">
+            <div className="flex-shrink-0 w-6 h-6 rounded-full bg-brand-600 flex items-center justify-center text-xs font-bold text-white">1</div>
+            <div>
+              <p className="text-sm font-medium text-white">Instalar la extensión del navegador</p>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Instalá{' '}
+                <a
+                  href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-brand-400 hover:text-brand-300 underline inline-flex items-center gap-0.5"
+                >
+                  Get cookies.txt LOCALLY <ExternalLink className="w-3 h-3" />
+                </a>{' '}
+                (Chrome) o equivalente para Firefox.
               </p>
             </div>
           </div>
-          {!authorized && (
-            <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors">
-              <X className="w-4 h-4" />
-            </button>
-          )}
+
+          {/* Paso 2 */}
+          <div className="flex gap-3">
+            <div className="flex-shrink-0 w-6 h-6 rounded-full bg-brand-600 flex items-center justify-center text-xs font-bold text-white">2</div>
+            <div>
+              <p className="text-sm font-medium text-white">Exportar las cookies de YouTube</p>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Andá a <span className="text-white font-mono">youtube.com</span> con tu cuenta iniciada,
+                hacé clic en la extensión y descargá el archivo <span className="font-mono text-white">cookies.txt</span>.
+              </p>
+            </div>
+          </div>
+
+          {/* Paso 3 — subida */}
+          <div className="flex gap-3">
+            <div className="flex-shrink-0 w-6 h-6 rounded-full bg-brand-600 flex items-center justify-center text-xs font-bold text-white">3</div>
+            <div className="flex-1">
+              <p className="text-sm font-medium text-white mb-2">Subir el archivo cookies.txt</p>
+              <label className={cn(
+                'flex items-center gap-3 px-4 py-3 rounded-xl border-2 border-dashed cursor-pointer transition-colors',
+                cookiesText
+                  ? 'border-green-500/40 bg-green-500/5 text-green-300'
+                  : 'border-surface-500 hover:border-brand-500/50 text-slate-400 hover:text-slate-300',
+              )}>
+                <input
+                  type="file"
+                  accept=".txt,text/plain"
+                  onChange={handleFile}
+                  className="hidden"
+                />
+                {cookiesText ? (
+                  <>
+                    <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0" />
+                    <span className="text-sm font-medium truncate">{fileName || 'Archivo cargado'}</span>
+                  </>
+                ) : (
+                  <>
+                    <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                    <span className="text-sm">Hacé clic para seleccionar cookies.txt</span>
+                  </>
+                )}
+              </label>
+            </div>
+          </div>
+
+          {/* Aviso de seguridad */}
+          <div className="bg-amber-500/8 border border-amber-500/20 rounded-xl px-4 py-3 flex gap-2.5">
+            <Info className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
+            <p className="text-xs text-amber-300">
+              Las cookies se guardan en el servidor de forma segura y solo se usan para autenticarse en YouTube via yt-dlp.
+              Regeneralas desde YouTube si sospechás que fueron comprometidas.
+            </p>
+          </div>
         </div>
 
-        <div className="px-6 py-5 space-y-5">
-
-          {authorized ? (
-            /* ── Estado: autorizado ──────────────────────────────── */
-            <div className="flex flex-col items-center gap-3 py-4 text-center">
-              <div className="w-14 h-14 rounded-full bg-green-500/15 flex items-center justify-center">
-                <CheckCircle2 className="w-8 h-8 text-green-400" />
-              </div>
-              <div>
-                <p className="text-base font-semibold text-white">¡Cuenta conectada!</p>
-                <p className="text-sm text-slate-400 mt-1">
-                  Ahora podés usar fuentes YouTube sin restricciones de bot detection.
-                </p>
-              </div>
-            </div>
-
-          ) : hasError ? (
-            /* ── Estado: error ───────────────────────────────────── */
-            <div className="flex flex-col items-center gap-3 py-4 text-center">
-              <div className="w-14 h-14 rounded-full bg-red-500/15 flex items-center justify-center">
-                <XCircle className="w-8 h-8 text-red-400" />
-              </div>
-              <div>
-                <p className="text-base font-semibold text-white">Error en la autorización</p>
-                <p className="text-sm text-slate-400 mt-1 break-words">
-                  {pollData?.errorMessage ?? 'Ocurrió un error. Intentá de nuevo.'}
-                </p>
-              </div>
-              <button
-                onClick={onClose}
-                className="px-4 py-2 rounded-xl bg-surface-600 hover:bg-surface-500 text-sm font-medium text-white transition-colors"
-              >
-                Cerrar
-              </button>
-            </div>
-
-          ) : !urlReady ? (
-            /* ── Estado: esperando URL+código de yt-dlp ─────────── */
-            <div className="flex flex-col items-center gap-3 py-6 text-center">
-              <Loader2 className="w-8 h-8 text-brand-400 animate-spin" />
-              <div>
-                <p className="text-sm font-semibold text-white">Iniciando sesión con Google...</p>
-                <p className="text-xs text-slate-400 mt-1">Obteniendo código de autorización. Puede tardar unos segundos.</p>
-              </div>
-              <button
-                onClick={onClose}
-                className="mt-2 px-4 py-2 rounded-xl text-sm font-medium text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
-              >
-                Cancelar
-              </button>
-            </div>
-
-          ) : (
-            /* ── Estado: URL+código listos ───────────────────────── */
-            <>
-              {/* Paso 1 */}
-              <div className="flex gap-3">
-                <div className="flex-shrink-0 w-6 h-6 rounded-full bg-brand-600 flex items-center justify-center text-xs font-bold text-white">1</div>
-                <div className="flex-1">
-                  <p className="text-sm font-medium text-white mb-1.5">Abrir la página de activación</p>
-                  <a
-                    href={authUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-sm font-medium text-white transition-colors"
-                  >
-                    <ExternalLink className="w-3.5 h-3.5" />
-                    Abrir {authUrl.replace('https://', '')}
-                  </a>
-                  <p className="text-xs text-slate-500 mt-1">O copiá: <span className="text-slate-400 font-mono">{authUrl}</span></p>
-                </div>
-              </div>
-
-              {/* Paso 2 */}
-              <div className="flex gap-3">
-                <div className="flex-shrink-0 w-6 h-6 rounded-full bg-brand-600 flex items-center justify-center text-xs font-bold text-white">2</div>
-                <div className="flex-1">
-                  <p className="text-sm font-medium text-white mb-1.5">Ingresar este código</p>
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1 bg-surface-700 border border-surface-500 rounded-xl px-4 py-2.5 font-mono text-xl font-bold text-white tracking-widest text-center">
-                      {userCode}
-                    </div>
-                    <button
-                      onClick={copyCode}
-                      className="p-2.5 rounded-xl bg-surface-700 border border-surface-500 hover:bg-surface-600 text-slate-300 hover:text-white transition-colors"
-                      title="Copiar código"
-                    >
-                      {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {/* Paso 3 */}
-              <div className="flex gap-3">
-                <div className="flex-shrink-0 w-6 h-6 rounded-full bg-brand-600 flex items-center justify-center text-xs font-bold text-white">3</div>
-                <div>
-                  <p className="text-sm font-medium text-white">Seleccionar tu cuenta de Google y autorizar</p>
-                  <p className="text-xs text-slate-500 mt-0.5">La ventana se cerrará automáticamente al completar.</p>
-                </div>
-              </div>
-
-              {/* Spinner de espera */}
-              <div className="flex items-center justify-center gap-2 pt-1 text-slate-400">
-                <Loader2 className="w-4 h-4 animate-spin" />
-                <span className="text-sm">Esperando autorización...</span>
-              </div>
-
-              <div className="flex justify-end pt-1">
-                <button
-                  onClick={onClose}
-                  className="px-4 py-2 rounded-xl text-sm font-medium text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
-                >
-                  Cancelar
-                </button>
-              </div>
-            </>
-          )}
+        {/* Footer */}
+        <div className="px-6 py-4 border-t border-white/10 flex justify-end gap-3">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 rounded-xl text-sm font-medium text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={handleUpload}
+            disabled={!cookiesText.trim() || uploadMut.isPending}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-red-500/20 hover:bg-red-500/30 text-red-300 hover:text-red-200 text-sm font-semibold transition-colors disabled:opacity-40"
+          >
+            {uploadMut.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Youtube className="w-3.5 h-3.5" />}
+            Guardar cookies
+          </button>
         </div>
       </div>
     </div>
@@ -257,22 +218,12 @@ function DeviceFlowModal({ sessionId, onClose, onSuccess }: DeviceFlowModalProps
 
 function YoutubeConnectCard() {
   const { data: authStatus, isLoading, refetch } = useYoutubeAuthStatus();
-  const startFlow   = useYoutubeStartFlow();
   const disconnect  = useYoutubeDisconnect();
-  // Solo almacenamos el sessionId — el URL+código llegan via polling
-  const [pollSessionId, setPollSessionId] = useState<string | null>(null);
-
-  const handleConnect = async () => {
-    try {
-      const { sessionId } = await startFlow.mutateAsync();
-      setPollSessionId(sessionId);
-    } catch { /* toast shown by mutation */ }
-  };
+  const [showModal, setShowModal] = useState(false);
 
   const handleSuccess = () => {
-    setPollSessionId(null);
+    setShowModal(false);
     refetch();
-    toast.success('¡Cuenta de YouTube conectada! Las fuentes YouTube ya no necesitan cookies.');
   };
 
   return (
@@ -303,17 +254,17 @@ function YoutubeConnectCard() {
               <>
                 <div className="flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-green-400" />
-                  <p className="text-sm font-semibold text-green-300">Cuenta de YouTube conectada</p>
+                  <p className="text-sm font-semibold text-green-300">Cookies de YouTube activas</p>
                 </div>
                 <p className="text-xs text-green-400/70 mt-0.5">
-                  {authStatus.email ?? 'Cuenta Google autorizada'} · Las fuentes YouTube usan OAuth2 (sin bot detection)
+                  Autenticado via cookies · Las fuentes YouTube están protegidas contra bot detection
                 </p>
               </>
             ) : (
               <>
-                <p className="text-sm font-semibold text-red-300">Sin cuenta de YouTube conectada</p>
+                <p className="text-sm font-semibold text-red-300">Sin autenticación en YouTube</p>
                 <p className="text-xs text-red-400/70 mt-0.5">
-                  Las fuentes YouTube pueden fallar por bot detection en IPs de servidor. Conectá tu cuenta para evitarlo.
+                  Las fuentes YouTube pueden fallar por bot detection en IPs de servidor. Subí tus cookies para evitarlo.
                 </p>
               </>
             )}
@@ -322,33 +273,39 @@ function YoutubeConnectCard() {
           {/* Acción */}
           {!isLoading && (
             authStatus?.connected ? (
-              <button
-                onClick={() => disconnect.mutate()}
-                disabled={disconnect.isPending}
-                className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-700 hover:bg-surface-600 text-slate-300 hover:text-white text-xs font-medium transition-colors disabled:opacity-50"
-              >
-                {disconnect.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <LogOut className="w-3.5 h-3.5" />}
-                Desconectar
-              </button>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  onClick={() => setShowModal(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-700 hover:bg-surface-600 text-slate-300 hover:text-white text-xs font-medium transition-colors"
+                >
+                  <Youtube className="w-3.5 h-3.5" />
+                  Actualizar
+                </button>
+                <button
+                  onClick={() => disconnect.mutate()}
+                  disabled={disconnect.isPending}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-700 hover:bg-surface-600 text-slate-300 hover:text-white text-xs font-medium transition-colors disabled:opacity-50"
+                >
+                  {disconnect.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <LogOut className="w-3.5 h-3.5" />}
+                  Desconectar
+                </button>
+              </div>
             ) : (
               <button
-                onClick={handleConnect}
-                disabled={startFlow.isPending}
-                className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-300 hover:text-red-200 text-xs font-semibold transition-colors disabled:opacity-50"
+                onClick={() => setShowModal(true)}
+                className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-300 hover:text-red-200 text-xs font-semibold transition-colors"
               >
-                {startFlow.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Youtube className="w-3.5 h-3.5" />}
-                Conectar cuenta
+                <Youtube className="w-3.5 h-3.5" />
+                Subir cookies
               </button>
             )
           )}
         </div>
       </div>
 
-      {/* Modal de Device Flow — se abre en cuanto tenemos sessionId */}
-      {pollSessionId && (
-        <DeviceFlowModal
-          sessionId={pollSessionId}
-          onClose={() => setPollSessionId(null)}
+      {showModal && (
+        <CookiesUploadModal
+          onClose={() => setShowModal(false)}
           onSuccess={handleSuccess}
         />
       )}

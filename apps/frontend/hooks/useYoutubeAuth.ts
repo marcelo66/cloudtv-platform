@@ -10,24 +10,6 @@ export interface YoutubeAuthStatus {
   since:     string | null;
 }
 
-/** Respuesta inmediata de POST /start — sólo el sessionId */
-export interface DeviceFlowStart {
-  sessionId: string;
-}
-
-/** Alias para compatibilidad con imports existentes en page.tsx */
-export type DeviceFlowSession = DeviceFlowStart;
-
-export type DeviceFlowStatus = 'pending' | 'url_ready' | 'authorized' | 'error' | 'not_found';
-
-/** Respuesta del polling — incluye authUrl+userCode cuando status=url_ready */
-export interface DeviceFlowPoll {
-  status:        DeviceFlowStatus;
-  authUrl?:      string;
-  userCode?:     string;
-  errorMessage?: string;
-}
-
 // ─── Queries ──────────────────────────────────────────────────
 
 /** Estado de conexión del usuario actual (refresca cada 30s) */
@@ -42,30 +24,25 @@ export function useYoutubeAuthStatus() {
   });
 }
 
-/** Polling de estado de una sesión de autorización activa (cada 2s) */
-export function useYoutubeDevicePoll(sessionId: string | null) {
-  return useQuery<DeviceFlowPoll>({
-    queryKey: ['youtube-auth-poll', sessionId],
-    queryFn:  async () => {
-      const { data } = await apiClient.get(`/youtube-auth/status/${sessionId}`);
-      return data;
-    },
-    enabled:         !!sessionId,
-    refetchInterval: 2_000,
-  });
-}
-
 // ─── Mutations ────────────────────────────────────────────────
 
-/** Iniciar el Device Authorization Flow — devuelve { sessionId } inmediatamente */
-export function useYoutubeStartFlow() {
-  return useMutation<DeviceFlowStart>({
-    mutationFn: async () => {
-      const { data } = await apiClient.post('/youtube-auth/start');
+/**
+ * Subir cookies.txt exportadas desde el navegador.
+ * Recibe el contenido completo del archivo como string.
+ */
+export function useYoutubeUploadCookies() {
+  const qc = useQueryClient();
+  return useMutation<{ success: boolean }, Error, string>({
+    mutationFn: async (cookies: string) => {
+      const { data } = await apiClient.post('/youtube-auth/cookies', { cookies });
       return data;
     },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['youtube-auth'] });
+      toast.success('¡Cookies de YouTube guardadas! Las fuentes YouTube están autenticadas.');
+    },
     onError: (err: any) => {
-      const msg = err?.response?.data?.message ?? 'Error al iniciar autorización con YouTube';
+      const msg = err?.response?.data?.message ?? 'Error al guardar las cookies';
       toast.error(msg);
     },
   });
