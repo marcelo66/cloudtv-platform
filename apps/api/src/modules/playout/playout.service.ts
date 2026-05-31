@@ -364,46 +364,30 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       if (item.video.duration) totalDuration += item.video.duration;
     }
 
-    // ── Normalización paralela (sincrónica) de archivos raw ───────────────────────
+    // ── Normalización broadcast en background ─────────────────────────────────────
     //
-    // Todos los videos DEBEN tener el mismo formato antes de iniciar el stream.
-    // Si usamos archivos raw con distintos fps/resolución/codec, el concat demuxer
-    // fuerza al decoder a reinicializarse en cada transición (~500ms-2s de pausa).
-    // Esa pausa agota el buffer del player → "cargando" entre videos.
+    // ARRANQUE INMEDIATO: el stream inicia ahora mismo con los archivos disponibles
+    // (raw o norm). La normalización ocurre en background SECUENCIALMENTE para no
+    // saturar la CPU del servidor (paralelo es peor en containers con CPU limitada:
+    // N procesos × 1/N CPU = misma velocidad por video, pero el total nunca mejora
+    // y bloquea el arranque si algún video es largo).
     //
-    // Solución: normalizar TODOS los archivos raw EN PARALELO con preset ultrafast
-    // antes de arrancar FFmpeg. Tiempo típico: 15-60 s según cantidad y duración.
-    // El resultado queda en caché (norm_{quality}_{id}.mp4) para próximas sesiones.
-    let allNormalized = pendingNorm.length === 0;
+    // Primera ejecución: raw → re-encode en tiempo real (puede haber breves freezes
+    //   en transiciones si los archivos tienen distintos fps/resolución).
+    // Ejecuciones posteriores: norm cache → stream-copy, transiciones frame-perfect.
+    const allNormalized = pendingNorm.length === 0;
 
-    if (!allNormalized) {
-      const t0 = Date.now();
-      this.log(session, `⚙ Normalizando ${pendingNorm.length} video(s) en paralelo antes de salir al aire…`);
-
-      await Promise.all(
-        pendingNorm.map(async ({ rawPath, normPath }) => {
-          if (session.stopping) return;
-          try {
-            await this.normalizeVideoForBroadcast(rawPath, normPath, qualityEarly);
-            // Sustituir rawPath → normPath en el mapa de descarga
-            for (const [k, v] of downloadedMap.entries()) {
-              if (v === rawPath) downloadedMap.set(k, normPath);
-            }
-            const idx = downloadedMp4s.indexOf(rawPath);
-            if (idx >= 0) downloadedMp4s[idx] = normPath;
-            this.log(session, `  ✓ ${path.basename(normPath)}`);
-          } catch (err: any) {
-            this.log(session, `  WARN: ${path.basename(rawPath)}: ${err.message} (se usará raw)`);
-          }
-        }),
-      );
-
-      if (session.stopping) return;
-      const elapsed = Math.round((Date.now() - t0) / 1000);
-      allNormalized = downloadedMp4s.every(p => path.basename(p).startsWith('norm_'));
-      this.log(session, `✓ Normalización completada en ${elapsed}s → ${allNormalized ? 'stream-copy disponible' : 'algunos archivos en raw'}`);
-    } else {
+    if (allNormalized) {
       this.log(session, `✓ Todo en caché broadcast-ready → stream-copy disponible`);
+    } else {
+      this.log(session, `⚙ ${pendingNorm.length} video(s) se normalizarán en background (arranque inmediato)`);
+      // Ordenar de más corto a más largo para que los videos breves queden listos primero
+      pendingNorm.sort((a, b) => {
+        const durA = playlist.items.find(it => a.rawPath.includes(it.video.id))?.video.duration ?? 0;
+        const durB = playlist.items.find(it => b.rawPath.includes(it.video.id))?.video.duration ?? 0;
+        return durA - durB;
+      });
+      this.runBackgroundNormalization(session, pendingNorm, qualityEarly);
     }
 
     this.log(session, `Preparación: ${downloadedMp4s.length} video(s) · ${(totalDuration / 60).toFixed(1)} min`);
