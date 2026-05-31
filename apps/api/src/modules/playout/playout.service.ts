@@ -43,6 +43,10 @@ interface PlayoutSession {
   scheduleWatchTimer: ReturnType<typeof setTimeout> | null;
   /** Timer de refresco periódico de temperatura (TEMPERATURE overlays) */
   tempRefreshTimer: ReturnType<typeof setTimeout> | null;
+  /** true → runBackgroundNormalization está activo; no lanzar una segunda instancia */
+  bgNormRunning: boolean;
+  /** Timer del watchdog de segmentos HLS (detecta FFmpeg estancado) */
+  segmentWatchTimer: ReturnType<typeof setTimeout> | null;
   // ─── Ingesta ──────────────────────────────────────────────────
   /** ID de la fuente de ingesta activa (null = programación normal) */
   activeIngestId: string | null;
@@ -156,6 +160,8 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       scheduleChangePending: false,
       scheduleWatchTimer: null,
       tempRefreshTimer: null,
+      bgNormRunning: false,
+      segmentWatchTimer: null,
       activeIngestId: null,
       ingestProcess: null,
       ytDlpProcess: null,
@@ -385,13 +391,17 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       this.log(session, `✓ Todo en caché broadcast-ready → stream-copy disponible`);
     } else {
       this.log(session, `⚙ ${pendingNorm.length} video(s) se normalizarán en background (arranque inmediato)`);
-      // Ordenar de más corto a más largo para que los videos breves queden listos primero
-      pendingNorm.sort((a, b) => {
-        const durA = playlist.items.find(it => a.rawPath.includes(it.video.id))?.video.duration ?? 0;
-        const durB = playlist.items.find(it => b.rawPath.includes(it.video.id))?.video.duration ?? 0;
-        return durA - durB;
-      });
-      this.runBackgroundNormalization(session, pendingNorm, qualityEarly);
+      if (!session.bgNormRunning) {
+        // Ordenar de más corto a más largo: los videos breves quedan listos primero
+        pendingNorm.sort((a, b) => {
+          const durA = playlist.items.find(it => a.rawPath.includes(it.video.id))?.video.duration ?? 0;
+          const durB = playlist.items.find(it => b.rawPath.includes(it.video.id))?.video.duration ?? 0;
+          return durA - durB;
+        });
+        this.runBackgroundNormalization(session, pendingNorm, qualityEarly);
+      } else {
+        this.log(session, `  (normalización ya en progreso — omitiendo nueva instancia para evitar conflicto)`);
+      }
     }
 
     this.log(session, `Preparación: ${downloadedMp4s.length} video(s) · ${(totalDuration / 60).toFixed(1)} min`);
@@ -799,12 +809,23 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       spawnedAt = Date.now();
       this.log(session, `FFmpeg PID=${proc.pid}. Esperando index.m3u8...`);
       this.waitForM3u8(session, m3u8Path, myPollToken);
+      // Arrancar watchdog de segmentos después de un período de gracia (20 s).
+      // El watchdog detecta si FFmpeg deja de producir segmentos sin crashear
+      // (stall silencioso al transicionar entre archivos raw de formatos distintos)
+      // y reinicia automáticamente para usar más archivos normalizados.
+      setTimeout(() => {
+        if (!session.stopping && session.process === proc) {
+          this.startSegmentWatchdog(session, m3u8Path);
+        }
+      }, 20_000);
     });
 
     proc.on('close', (code, sig) => {
       const uptime = Date.now() - spawnedAt;
       this.log(session, `FFmpeg terminó (code=${code} sig=${sig} uptime=${uptime}ms)`);
       session.process = null;
+      // Detener watchdog de segmentos — el nuevo FFmpeg arrancará uno propio
+      if (session.segmentWatchTimer) { clearTimeout(session.segmentWatchTimer); session.segmentWatchTimer = null; }
 
       if (session.stopping) return;
       if (session.activeIngestId) return; // ingesta tomó el control — no reiniciar playlist
@@ -1482,17 +1503,68 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
    * Cuando termina, el próximo reinicio detectará todos los norm en caché
    * y usará stream-copy (ruta B, sin decode/encode).
    */
+  /**
+   * Watchdog de segmentos HLS.
+   *
+   * Después de que el stream arranca, monitorea la hora de modificación del m3u8
+   * cada 5 segundos. Si el m3u8 no se actualiza en 15 s (FFmpeg dejó de emitir
+   * segmentos sin crashear), reinicia FFmpeg via scheduleChangePending.
+   *
+   * Cada reinicio usa más archivos norm_*.mp4 (porque bg-norm avanzó), por lo que
+   * las transiciones son más fluidas con cada iteración hasta que todas son smooth.
+   */
+  private startSegmentWatchdog(session: PlayoutSession, m3u8Path: string): void {
+    const POLL_MS  = 5_000;   // comprobar cada 5 s
+    const STALL_MS = 15_000;  // 15 s sin nuevo segmento = FFmpeg estancado (7.5× hls_time 2s)
+
+    let lastMtime    = 0;
+    let lastUpdateAt = Date.now();
+
+    // Semilla: capturar mtime actual para no dispararse al arrancar
+    fs.stat(m3u8Path).then(s => { lastMtime = s.mtimeMs; lastUpdateAt = Date.now(); }).catch(() => {});
+
+    const tick = async () => {
+      if (session.stopping || !this.sessions.has(session.channelId) || !session.process) return;
+
+      try {
+        const stat = await fs.stat(m3u8Path);
+        if (stat.mtimeMs > lastMtime) {
+          // Nuevo segmento escrito → resetear contador de stall
+          lastMtime    = stat.mtimeMs;
+          lastUpdateAt = Date.now();
+        } else if (Date.now() - lastUpdateAt > STALL_MS && !session.scheduleChangePending) {
+          // Sin segmentos nuevos → FFmpeg estancado
+          this.log(session, `WARN: FFmpeg estancado (${STALL_MS / 1000}s sin segmentos) → reiniciando con más archivos normalizados`);
+          session.segmentWatchTimer = null;
+          session.scheduleChangePending = true;
+          const proc = session.process;
+          if (proc) { try { proc.kill('SIGTERM'); } catch {} }
+          return; // El close handler reinicia; él iniciará un nuevo watchdog
+        }
+      } catch { /* m3u8 puede no existir brevemente — ignorar */ }
+
+      if (!session.stopping && this.sessions.has(session.channelId) && session.process) {
+        session.segmentWatchTimer = setTimeout(tick, POLL_MS);
+      }
+    };
+
+    if (session.segmentWatchTimer) { clearTimeout(session.segmentWatchTimer); }
+    session.segmentWatchTimer = setTimeout(tick, POLL_MS);
+  }
+
   private runBackgroundNormalization(
     session: PlayoutSession,
     items: Array<{ rawPath: string; normPath: string }>,
     quality: { scale: string; vBitrate: string; maxrate: string; bufsize: string; aBitrate: string },
   ): void {
+    session.bgNormRunning = true;
     (async () => {
       this.log(session, `[bg-norm] Iniciando normalización de ${items.length} video(s) en background…`);
       let done = 0;
       for (const { rawPath, normPath } of items) {
         if (session.stopping || !this.sessions.has(session.channelId)) {
           this.log(session, `[bg-norm] Cancelado (canal detenido)`);
+          session.bgNormRunning = false;
           return;
         }
         try {
@@ -1503,34 +1575,23 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           this.log(session, `[bg-norm] WARN: falló ${path.basename(rawPath)}: ${err.message}`);
         }
       }
+      session.bgNormRunning = false;
       if (session.stopping || !this.sessions.has(session.channelId)) return;
 
       if (done < items.length) {
-        // Algunas normalizaciones fallaron — no reiniciar; se usarán los archivos raw para esos videos
-        this.log(session, `[bg-norm] Completado con ${items.length - done} error(s). Los archivos raw se seguirán usando para esos videos.`);
+        this.log(session, `[bg-norm] Completado con ${items.length - done} error(s). Archivos raw se mantendrán para esos videos.`);
         return;
       }
 
-      // ── Todos los videos normalizados → reiniciar para activar stream-copy ──────────────
-      //
-      // El stream actual usa archivos raw (primer arranque). Ahora que todos los
-      // norm_*.mp4 están listos, un reinicio suave cambiará a stream-copy:
-      //   • Transiciones frame-perfect (sin decoder re-init)
-      //   • 0 CPU de encode para el camino sin overlays
-      //   • Calidad idéntica sin artifacts de recompresión
-      //
-      // scheduleChangePending + SIGTERM usa el mecanismo de reinicio limpio existente
-      // (no cuenta como fallo, los outputs RTMP se reconectan solos).
-      this.log(session, `[bg-norm] ✓ ${done} video(s) normalizados — reiniciando en 3s para activar stream-copy (breve interrupción)…`);
+      // ── Todos normalizados → reiniciar para activar stream-copy ───────────────────────
+      this.log(session, `[bg-norm] ✓ ${done} video(s) normalizados — reiniciando en 3s para activar stream-copy…`);
       setTimeout(() => {
         if (session.stopping || !this.sessions.has(session.channelId)) return;
         session.scheduleChangePending = true;
         const proc = session.process;
-        if (proc) {
-          try { proc.kill('SIGTERM'); } catch { /* ok */ }
-        }
+        if (proc) { try { proc.kill('SIGTERM'); } catch { /* ok */ } }
       }, 3_000);
-    })().catch(() => {});
+    })().catch(() => { session.bgNormRunning = false; });
   }
 
   /**
