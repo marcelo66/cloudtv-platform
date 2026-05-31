@@ -364,15 +364,48 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       if (item.video.duration) totalDuration += item.video.duration;
     }
 
-    // ¿Todos los archivos ya están en formato broadcast-ready?
-    const allNormalized = pendingNorm.length === 0;
-    if (allNormalized) {
-      this.log(session, `✓ Todo broadcast-ready → stream-copy disponible`);
+    // ── Normalización paralela (sincrónica) de archivos raw ───────────────────────
+    //
+    // Todos los videos DEBEN tener el mismo formato antes de iniciar el stream.
+    // Si usamos archivos raw con distintos fps/resolución/codec, el concat demuxer
+    // fuerza al decoder a reinicializarse en cada transición (~500ms-2s de pausa).
+    // Esa pausa agota el buffer del player → "cargando" entre videos.
+    //
+    // Solución: normalizar TODOS los archivos raw EN PARALELO con preset ultrafast
+    // antes de arrancar FFmpeg. Tiempo típico: 15-60 s según cantidad y duración.
+    // El resultado queda en caché (norm_{quality}_{id}.mp4) para próximas sesiones.
+    let allNormalized = pendingNorm.length === 0;
+
+    if (!allNormalized) {
+      const t0 = Date.now();
+      this.log(session, `⚙ Normalizando ${pendingNorm.length} video(s) en paralelo antes de salir al aire…`);
+
+      await Promise.all(
+        pendingNorm.map(async ({ rawPath, normPath }) => {
+          if (session.stopping) return;
+          try {
+            await this.normalizeVideoForBroadcast(rawPath, normPath, qualityEarly);
+            // Sustituir rawPath → normPath en el mapa de descarga
+            for (const [k, v] of downloadedMap.entries()) {
+              if (v === rawPath) downloadedMap.set(k, normPath);
+            }
+            const idx = downloadedMp4s.indexOf(rawPath);
+            if (idx >= 0) downloadedMp4s[idx] = normPath;
+            this.log(session, `  ✓ ${path.basename(normPath)}`);
+          } catch (err: any) {
+            this.log(session, `  WARN: ${path.basename(rawPath)}: ${err.message} (se usará raw)`);
+          }
+        }),
+      );
+
+      if (session.stopping) return;
+      const elapsed = Math.round((Date.now() - t0) / 1000);
+      allNormalized = downloadedMp4s.every(p => path.basename(p).startsWith('norm_'));
+      this.log(session, `✓ Normalización completada en ${elapsed}s → ${allNormalized ? 'stream-copy disponible' : 'algunos archivos en raw'}`);
     } else {
-      this.log(session, `⚠ ${pendingNorm.length} video(s) sin normalizar → re-encode en tiempo real; normalización en background…`);
-      // Lanzar normalización en background — no bloquea el arranque del stream
-      this.runBackgroundNormalization(session, pendingNorm, qualityEarly);
+      this.log(session, `✓ Todo en caché broadcast-ready → stream-copy disponible`);
     }
+
     this.log(session, `Preparación: ${downloadedMp4s.length} video(s) · ${(totalDuration / 60).toFixed(1)} min`);
 
     if (downloadedMp4s.length === 0) {
@@ -1303,37 +1336,53 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
    * Si la petición falla, escribe "--°C" / "--°F" para que el overlay muestre
    * algo en lugar de crashear.
    */
+  /**
+   * Escribe el archivo de temperatura para el overlay.
+   *
+   * El archivo se crea INMEDIATAMENTE con el valor de fallback ("--°C/F") para que
+   * FFmpeg pueda arrancar sin esperar la red. Luego, en background, se consulta
+   * wttr.in y si tiene éxito se actualiza el archivo; drawtext lo leerá en el
+   * siguiente frame gracias a reload=1.
+   *
+   * Evita el bloqueo de 8 s (timeout de red) que retrasaba el arranque del canal.
+   */
   private async writeTempFile(session: PlayoutSession, overlay: Overlay): Promise<void> {
     const cfg      = overlay.config as any;
     const city     = ((cfg.city as string) ?? 'Buenos Aires').trim();
     const isFahr   = (cfg.unit as string) === 'fahrenheit';
     const showUnit = cfg.showUnit !== false;
     const filePath = `/tmp/cloudtv-wtemp-${session.channelId}-${overlay.id}.txt`;
+    const fallback = isFahr ? '--F' : '--C';   // ASCII: el grado se añade en el fetch
 
-    let content = isFahr ? '--°F' : '--°C';
-    try {
-      const controller = new AbortController();
-      const timer      = setTimeout(() => controller.abort(), 8_000);
-      const resp = await fetch(
-        `https://wttr.in/${encodeURIComponent(city)}?format=j1`,
-        { signal: controller.signal },
-      );
-      clearTimeout(timer);
-      if (resp.ok) {
-        const json = await resp.json() as any;
-        const cond = json.current_condition?.[0];
-        if (cond) {
-          const raw     = isFahr ? (cond.temp_F as string) : (cond.temp_C as string);
-          const unitCh  = isFahr ? 'F' : 'C';
-          content = showUnit ? `${raw}°${unitCh}` : `${raw}°`;
+    // Paso 1: escribir placeholder INMEDIATAMENTE para que FFmpeg arranque sin esperar
+    await fs.writeFile(filePath, fallback, 'utf8');
+
+    // Paso 2: obtener temperatura real en background (no bloquea el arranque)
+    const fetchTemp = async () => {
+      try {
+        const controller = new AbortController();
+        const timer      = setTimeout(() => controller.abort(), 8_000);
+        const resp = await fetch(
+          `https://wttr.in/${encodeURIComponent(city)}?format=j1`,
+          { signal: controller.signal },
+        );
+        clearTimeout(timer);
+        if (resp.ok) {
+          const json = await resp.json() as any;
+          const cond = json.current_condition?.[0];
+          if (cond) {
+            const raw    = isFahr ? (cond.temp_F as string) : (cond.temp_C as string);
+            const unit   = isFahr ? 'F' : 'C';
+            const content = showUnit ? `${raw}${unit}` : `${raw}`;
+            await fs.writeFile(filePath, content, 'utf8');
+            this.log(session, `  ✓ Temperatura "${overlay.name}" (${city}): ${content}`);
+          }
         }
+      } catch (err: any) {
+        this.log(session, `  WARN: Temperatura "${overlay.name}" no disponible (${err?.message ?? err})`);
       }
-      this.log(session, `  ✓ Temperatura "${overlay.name}" (${city}): ${content}`);
-    } catch (err: any) {
-      this.log(session, `  WARN: Temperatura "${overlay.name}" no disponible → ${content} (${err?.message ?? err})`);
-    }
-
-    await fs.writeFile(filePath, content, 'utf8');
+    };
+    fetchTemp().catch(() => {});
   }
 
   /**
@@ -1483,8 +1532,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
    *   Audio : AAC 44100 Hz estéreo · bitrate del preset de calidad
    *   Tiempo: timestamps desde 0 (avoid_negative_ts make_zero)
    *
-   * Usa preset 'fast' (mejor calidad que ultrafast, aceptable para pre-procesado
-   * offline) y CRF 22 (ligeramente superior al encode en vivo CRF 26).
+   * Usa preset 'ultrafast' para minimizar el tiempo de espera antes de salir al aire.
+   * Los archivos normalizados son el input del encoder en vivo (re-encode con CRF 26),
+   * por lo que la calidad de normalización tiene impacto mínimo en la salida final.
    *
    * Se llama UNA vez por video por sesión; el resultado se cachea en disco.
    */
@@ -1507,7 +1557,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
             'format=yuv420p',
           ].join(','),
           '-c:v',         'libx264',
-          '-preset',      'fast',     // Offline → mejor calidad que ultrafast
+          '-preset',      'ultrafast', // Rápido para no retrasar el arranque del canal
           '-crf',         '22',       // Ligeramente superior al vivo (CRF 26)
           '-b:v',         quality.vBitrate,
           '-maxrate',     quality.maxrate,
