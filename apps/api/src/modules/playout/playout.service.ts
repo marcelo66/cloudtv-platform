@@ -809,10 +809,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       if (session.stopping) return;
       if (session.activeIngestId) return; // ingesta tomó el control — no reiniciar playlist
 
-      // ── Reinicio limpio por cambio de programa (no cuenta como fallo) ──────────
+      // ── Reinicio limpio: cambio de programa O normalización completada ──────────
       if (session.scheduleChangePending) {
         session.scheduleChangePending = false;
-        this.log(session, 'Reiniciando con nueva programación...');
+        this.log(session, 'Reiniciando (programación o normalización lista)…');
         this.stopRtmpOutputs(session, false);
         setTimeout(() => {
           if (!session.stopping && this.sessions.has(session.channelId)) {
@@ -1503,9 +1503,33 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           this.log(session, `[bg-norm] WARN: falló ${path.basename(rawPath)}: ${err.message}`);
         }
       }
-      if (!session.stopping && this.sessions.has(session.channelId)) {
-        this.log(session, `[bg-norm] ✓ Todos normalizados. Próximo reinicio usará stream-copy.`);
+      if (session.stopping || !this.sessions.has(session.channelId)) return;
+
+      if (done < items.length) {
+        // Algunas normalizaciones fallaron — no reiniciar; se usarán los archivos raw para esos videos
+        this.log(session, `[bg-norm] Completado con ${items.length - done} error(s). Los archivos raw se seguirán usando para esos videos.`);
+        return;
       }
+
+      // ── Todos los videos normalizados → reiniciar para activar stream-copy ──────────────
+      //
+      // El stream actual usa archivos raw (primer arranque). Ahora que todos los
+      // norm_*.mp4 están listos, un reinicio suave cambiará a stream-copy:
+      //   • Transiciones frame-perfect (sin decoder re-init)
+      //   • 0 CPU de encode para el camino sin overlays
+      //   • Calidad idéntica sin artifacts de recompresión
+      //
+      // scheduleChangePending + SIGTERM usa el mecanismo de reinicio limpio existente
+      // (no cuenta como fallo, los outputs RTMP se reconectan solos).
+      this.log(session, `[bg-norm] ✓ ${done} video(s) normalizados — reiniciando en 3s para activar stream-copy (breve interrupción)…`);
+      setTimeout(() => {
+        if (session.stopping || !this.sessions.has(session.channelId)) return;
+        session.scheduleChangePending = true;
+        const proc = session.process;
+        if (proc) {
+          try { proc.kill('SIGTERM'); } catch { /* ok */ }
+        }
+      }, 3_000);
     })().catch(() => {});
   }
 
