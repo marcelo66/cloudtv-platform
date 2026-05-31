@@ -504,8 +504,6 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         const adPath = adDownloads.get(spot.videoId);
         if (!adPath) continue;
         concatLines.push(`file '${adPath}'`);
-        // duration hint: permite al concat demuxer calcular timestamps exactos sin analizar EOF
-        if (spot.video.duration) concatLines.push(`duration ${spot.video.duration.toFixed(6)}`);
         totalAdsInjected++;
         this.adBlocksService.recordImpression(
           spot.id, adBlock.id, session.channelId,
@@ -539,31 +537,20 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
       // Video principal (con posibles MID_ROLLs de cue points)
       if (midRolls.length === 0) {
-        // Duración efectiva del segmento: del trimStart al trimEnd (o duración total)
-        const segStart = item.trimStart ?? 0;
-        const segEnd   = item.trimEnd   ?? videoDuration;
-        const segDur   = segEnd - segStart;
         concatLines.push(`file '${mp4Path}'`);
-        if (segDur > 0) concatLines.push(`duration ${segDur.toFixed(6)}`);
         if (item.trimStart) concatLines.push(`inpoint ${item.trimStart}`);
         if (item.trimEnd)   concatLines.push(`outpoint ${item.trimEnd}`);
       } else {
         let inpoint: number = item.trimStart ?? 0;
         for (const cp of midRolls) {
           const outpoint = cp.timeOffset!;
-          const segDur   = outpoint - inpoint;
           concatLines.push(`file '${mp4Path}'`);
-          if (segDur > 0) concatLines.push(`duration ${segDur.toFixed(6)}`);
           if (inpoint > 0) concatLines.push(`inpoint ${inpoint}`);
           concatLines.push(`outpoint ${outpoint}`);
           await insertBlock(cp.adBlock, 'MID_ROLL');
           inpoint = outpoint;
         }
-        // Último segmento: desde último mid-roll hasta trimEnd/fin
-        const lastEnd = item.trimEnd ?? videoDuration;
-        const lastDur = lastEnd - inpoint;
         concatLines.push(`file '${mp4Path}'`);
-        if (lastDur > 0) concatLines.push(`duration ${lastDur.toFixed(6)}`);
         if (inpoint > 0)   concatLines.push(`inpoint ${inpoint}`);
         if (item.trimEnd)  concatLines.push(`outpoint ${item.trimEnd}`);
       }
@@ -680,8 +667,8 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       : null;
 
     // Filtro de video para el camino de re-encode sin overlays (archivos raw/mix).
-    // scale + pad → resolución exacta del canal; fps=25 + setpts → framerate y timestamps uniformes.
-    const normalizeVf = `scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,setpts=PTS-STARTPTS,fps=25,format=yuv420p`;
+    // Sin setpts=PTS-STARTPTS: el concat demuxer garantiza PTS monotónico entre archivos.
+    const normalizeVf = `scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,fps=25,format=yuv420p`;
 
     // Flags de tolerancia en el input: descarta paquetes corruptos / regenera PTS faltantes.
     const inputFlags = [
@@ -705,18 +692,24 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     // Nota: NO se usa -stream_loop -1.
     // El concat.txt tiene las entradas repetidas para ~24h (ver paso 4 arriba).
     // Al terminar (code=0), el close handler reinicia el proceso automáticamente.
+    // -thread_queue_size 512: aumenta el buffer de paquetes del concat demuxer
+    //   para absorber la latencia al abrir el siguiente archivo en una transición.
+    // -max_muxing_queue_size 9999: aumenta la cola del muxer HLS para absorber
+    //   variaciones de PTS en las transiciones entre archivos del concat.
     const args: string[] = overlayFilter
       ? [
           // Ruta A: decode + filter_complex + encode
           '-loglevel', 'warning',
           '-re',
           ...inputFlags,
+          '-thread_queue_size', '512',
           '-f', 'concat', '-safe', '0', '-i', concatPath,
           ...overlayFilter.extraInputArgs,
           '-filter_complex', finalFilterComplex!,
           '-map', overlayFilter.videoMapLabel,
           '-map', '[aout]',
           ...codecArgs,
+          '-max_muxing_queue_size', '9999',
           ...hlsArgs,
         ]
       : allNormalized
@@ -724,8 +717,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
             // Ruta B: stream-copy — bitstream pasa directo al muxer HLS sin decode/encode
             '-loglevel', 'warning',
             '-re',
+            '-thread_queue_size', '512',
             '-f', 'concat', '-safe', '0', '-i', concatPath,
             '-c', 'copy',
+            '-max_muxing_queue_size', '9999',
             ...hlsArgs,
           ]
         : [
@@ -733,10 +728,12 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
             '-loglevel', 'warning',
             '-re',
             ...inputFlags,
+            '-thread_queue_size', '512',
             '-f', 'concat', '-safe', '0', '-i', concatPath,
             '-vf', normalizeVf,
             '-af', audioFilter,
             ...codecArgs,
+            '-max_muxing_queue_size', '9999',
             ...hlsArgs,
           ];
 
@@ -1166,9 +1163,12 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
     const filterParts: string[] = [];
     const extraInputPaths: string[] = [];
-    // Normalización: misma cadena que el path sin overlays + setpts para timestamps limpios
+    // Normalización: escalar + rellenar negro + convertir a 25fps yuv420p.
+    // NO usar setpts=PTS-STARTPTS: el concat demuxer ya garantiza PTS monotónico
+    // y setpts=PTS-STARTPTS corrompe timestamps cuando el primer frame tiene PTS≠0
+    // (común en archivos raw, lo cual produce freezes al transicionar entre clips).
     filterParts.push(
-      `[0:v]scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,setpts=PTS-STARTPTS,fps=25,format=yuv420p[norm]`,
+      `[0:v]scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,fps=25,format=yuv420p[norm]`,
     );
     let currentStream = 'norm';
     let idx = 0;
