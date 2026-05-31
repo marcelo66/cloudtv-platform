@@ -1075,13 +1075,14 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         );
 
       } else if (ov.type === OverlayType.CLOCK) {
-        // El formato 'datetime' usa fecha + hora; 'time' solo hora
-        const fmt  = cfg.format === 'datetime' ? '%d/%m/%Y %H\\:%M\\:%S' : '%H\\:%M\\:%S';
-        // %{localtime\:FORMAT} → evalúa strftime(FORMAT) por frame con TZ del proceso
-        const text = `%{localtime\\:${fmt}}`;
-        const box  = `:box=1:boxcolor=${cfg.bgColor ?? 'black@0.6'}:boxborderw=10`;
+        // expansion=strftime: drawtext evalúa la cadena como strftime() usando el TZ
+        // del proceso (ver ffmpegEnv más arriba). %T = %H:%M:%S sin necesidad de escapes.
+        // Para datetime los ':' dentro del formato SÍ deben escaparse como '\:' porque
+        // son separadores de opciones en la sintaxis de filtros FFmpeg.
+        const fmt = cfg.format === 'datetime' ? '%d/%m/%Y %H\\:%M\\:%S' : '%T';
+        const box = `:box=1:boxcolor=${cfg.bgColor ?? 'black@0.6'}:boxborderw=10`;
         filterParts.push(
-          `[${currentStream}]drawtext=fontfile=${FONT_BOLD}:text=${text}:fontsize=${cfg.fontSize ?? 28}:fontcolor=${cfg.fontColor ?? 'white'}:${this.textXY(cfg)}${box}:fix_bounds=1[${nextStream}]`,
+          `[${currentStream}]drawtext=fontfile=${FONT_BOLD}:text=${fmt}:expansion=strftime:fontsize=${cfg.fontSize ?? 28}:fontcolor=${cfg.fontColor ?? 'white'}:${this.textXY(cfg)}${box}:fix_bounds=1[${nextStream}]`,
         );
 
       } else if (ov.type === OverlayType.TEXT_SCROLL || ov.type === OverlayType.TICKER) {
