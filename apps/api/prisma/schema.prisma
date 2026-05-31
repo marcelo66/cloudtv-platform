@@ -402,6 +402,7 @@ enum OverlayType {
   TEXT_SCROLL
   CLOCK
   TICKER
+  TEMPERATURE
 }
 
 enum IngestType {

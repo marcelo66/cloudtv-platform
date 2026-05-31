@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiClient from '@/lib/api-client';
 import { toast } from 'sonner';
 
-export type OverlayType = 'LOGO' | 'TEXT_STATIC' | 'TEXT_SCROLL' | 'CLOCK' | 'TICKER';
+export type OverlayType = 'LOGO' | 'TEXT_STATIC' | 'TEXT_SCROLL' | 'CLOCK' | 'TICKER' | 'TEMPERATURE';
 
 export interface Overlay {
   id: string;

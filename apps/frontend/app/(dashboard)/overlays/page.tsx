@@ -16,6 +16,7 @@ import {
   Upload,
   X,
   Info,
+  Thermometer,
 } from 'lucide-react';
 import { Header } from '@/components/dashboard/Header';
 import apiClient from '@/lib/api-client';
@@ -55,7 +56,7 @@ const TYPE_META: Record<OverlayType, { label: string; desc: string; Icon: any; c
   },
   CLOCK: {
     label: 'Reloj',
-    desc: 'Hora en tiempo real (localtime)',
+    desc: 'Hora en tiempo real',
     Icon: Clock,
     color: 'text-purple-400',
   },
@@ -64,6 +65,12 @@ const TYPE_META: Record<OverlayType, { label: string; desc: string; Icon: any; c
     desc: 'Banda scrolling tipo news ticker',
     Icon: AlignLeft,
     color: 'text-orange-400',
+  },
+  TEMPERATURE: {
+    label: 'Temperatura',
+    desc: 'Temperatura actual de una ciudad (wttr.in)',
+    Icon: Thermometer,
+    color: 'text-red-400',
   },
 };
 
@@ -81,14 +88,103 @@ const POSITIONS_BAR = [
   { value: 'top',    label: 'Arriba' },
 ];
 
+// ─── Presets de color de fondo ────────────────────────────────────────────────
+
+const BG_PRESETS = [
+  { label: 'Sin fondo',  value: 'black@0.0',    hex: 'rgba(0,0,0,0)' },
+  { label: 'Negro 40%',  value: 'black@0.4',    hex: 'rgba(0,0,0,0.4)' },
+  { label: 'Negro 60%',  value: 'black@0.6',    hex: 'rgba(0,0,0,0.6)' },
+  { label: 'Negro 80%',  value: 'black@0.8',    hex: 'rgba(0,0,0,0.8)' },
+  { label: 'Azul TV',    value: '#003280@0.85',  hex: 'rgba(0,50,128,0.85)' },
+  { label: 'Rojo',       value: '#cc0000@0.8',   hex: 'rgba(204,0,0,0.8)' },
+];
+
+function BgColorField({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div>
+      <label className="block text-xs text-slate-400 mb-1.5">Color fondo</label>
+      <div className="flex gap-1.5 flex-wrap mb-1.5" title="Presets rápidos">
+        {BG_PRESETS.map(p => (
+          <button
+            key={p.value}
+            type="button"
+            title={p.label}
+            onClick={() => onChange(p.value)}
+            style={{ background: p.hex }}
+            className={cn(
+              'w-6 h-6 rounded border-2 transition-all',
+              value === p.value
+                ? 'border-brand-400 scale-110'
+                : 'border-surface-500 hover:border-surface-300',
+            )}
+          />
+        ))}
+      </div>
+      <input
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder="black@0.6  |  #003280@0.85  |  red@0.7"
+        className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
+      />
+    </div>
+  );
+}
+
+// ─── Ajuste de posición (offsetX / offsetY) ───────────────────────────────────
+
+function OffsetInputs({
+  config,
+  setCfg,
+}: {
+  config: Record<string, any>;
+  setCfg: (k: string, v: any) => void;
+}) {
+  return (
+    <div>
+      <label className="block text-xs font-medium text-slate-400 mb-1">
+        Ajuste fino de posición (px)
+      </label>
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <label className="block text-xs text-slate-400 mb-1">X · + derecha / − izquierda</label>
+          <input
+            type="number"
+            step={1}
+            value={config.offsetX ?? 0}
+            onChange={e => setCfg('offsetX', +e.target.value)}
+            className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
+          />
+        </div>
+        <div>
+          <label className="block text-xs text-slate-400 mb-1">Y · + abajo / − arriba</label>
+          <input
+            type="number"
+            step={1}
+            value={config.offsetY ?? 0}
+            onChange={e => setCfg('offsetY', +e.target.value)}
+            className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Defaults por tipo ────────────────────────────────────────────────────────
 
 const DEFAULT_CONFIG: Record<OverlayType, Record<string, any>> = {
-  LOGO: { position: 'top-left', width: 120, opacity: 1 },
-  TEXT_STATIC: { text: '', position: 'bottom-right', fontSize: 24, fontColor: 'white', bgColor: 'black@0.5', bold: false },
+  LOGO:        { position: 'top-left', width: 120, opacity: 1, offsetX: 0, offsetY: 0 },
+  TEXT_STATIC: { text: '', position: 'bottom-right', fontSize: 24, fontColor: 'white', bgColor: 'black@0.5', bold: false, offsetX: 0, offsetY: 0 },
   TEXT_SCROLL: { text: '', position: 'bottom', fontSize: 20, fontColor: 'white', bgColor: 'black@0.7', speed: 80, barHeight: 36 },
-  CLOCK: { position: 'top-right', fontSize: 28, fontColor: 'white', bgColor: 'black@0.6', format: 'time', timezone: 'America/Argentina/Buenos_Aires' },
-  TICKER: { text: '', position: 'bottom', fontSize: 20, fontColor: 'white', bgColor: 'black@0.7', speed: 80, barHeight: 36 },
+  CLOCK:       { position: 'top-right', fontSize: 28, fontColor: 'white', bgColor: 'black@0.6', format: 'time_short', timezone: 'America/Argentina/Buenos_Aires', offsetX: 0, offsetY: 0 },
+  TICKER:      { text: '', position: 'bottom', fontSize: 20, fontColor: 'white', bgColor: 'black@0.7', speed: 80, barHeight: 36 },
+  TEMPERATURE: { city: 'Buenos Aires', unit: 'celsius', showUnit: true, position: 'top-right', fontSize: 28, fontColor: 'white', bgColor: 'black@0.6', offsetX: 0, offsetY: 0 },
 };
 
 // ─── Overlay card ─────────────────────────────────────────────────────────────
@@ -121,8 +217,13 @@ function OverlayCard({
       case 'TEXT_SCROLL':
       case 'TICKER':
         return `"${(cfg.text ?? '').slice(0, 40)}" · ${cfg.speed ?? 80}px/s · ${cfg.position ?? 'bottom'}`;
-      case 'CLOCK':
-        return `${cfg.format === 'datetime' ? 'Fecha + hora' : 'Solo hora'} · ${cfg.position ?? 'top-right'} · ${cfg.fontSize ?? 28}px`;
+      case 'CLOCK': {
+        const fmtLabel = cfg.format === 'datetime' ? 'Fecha+hora' : cfg.format === 'time' ? 'HH:MM:SS' : 'HH:MM';
+        const tz = cfg.timezone ? (cfg.timezone as string).split('/').pop() : '';
+        return `${fmtLabel} · ${cfg.position ?? 'top-right'} · ${cfg.fontSize ?? 28}px${tz ? ` · ${tz}` : ''}`;
+      }
+      case 'TEMPERATURE':
+        return `${cfg.city ?? 'Buenos Aires'} · ${cfg.unit === 'fahrenheit' ? '°F' : '°C'} · ${cfg.position ?? 'top-right'}`;
       default:
         return '';
     }
@@ -216,8 +317,8 @@ function OverlayFormModal({
     overlay?.config ?? DEFAULT_CONFIG['TEXT_STATIC'],
   );
   // Logo pendiente (solo en modo creación — se sube al guardar)
-  const [pendingLogo, setPendingLogo]         = useState<File | null>(null);
-  const [pendingLogoPreview, setPendingLogoPreview] = useState<string | null>(null);
+  const [pendingLogo, setPendingLogo]                 = useState<File | null>(null);
+  const [pendingLogoPreview, setPendingLogoPreview]   = useState<string | null>(null);
 
   // Cuando cambia el tipo (solo en creación) resetear config
   const handleTypeChange = (t: OverlayType) => {
@@ -244,7 +345,6 @@ function OverlayFormModal({
         { onSuccess: onClose },
       );
     } else {
-      // Crear overlay y — si hay logo pendiente — subirlo inmediatamente después
       createMut.mutate(
         {
           channelId,
@@ -256,7 +356,6 @@ function OverlayFormModal({
               try {
                 await uploadLogo.mutateAsync({ channelId, id: res.data.id, file: pendingLogo });
               } catch {
-                // El upload falló — el overlay ya fue creado, el logo se puede subir luego
                 toast.error('Overlay creado, pero falló la subida del logo. Intentá de nuevo editando el overlay.');
               }
             }
@@ -272,19 +371,15 @@ function OverlayFormModal({
     if (!file) return;
 
     if (isEdit) {
-      // Modo edición: subir inmediatamente y sincronizar el estado local
       uploadLogo.mutate(
         { channelId, id: overlay!.id, file },
         {
           onSuccess: (res: any) => {
-            // Sincronizar config local con el config guardado (que ahora tiene imageKey/imageUrl)
-            // Esto evita que "Guardar cambios" sobreescriba el imageUrl con el config viejo
             setConfig((prev: any) => ({ ...prev, ...res.data.config }));
           },
         },
       );
     } else {
-      // Modo creación: guardar local hasta que se cree el overlay
       if (pendingLogoPreview) URL.revokeObjectURL(pendingLogoPreview);
       setPendingLogo(file);
       setPendingLogoPreview(URL.createObjectURL(file));
@@ -352,7 +447,6 @@ function OverlayFormModal({
             </div>
           )}
 
-          {/* Config específico por tipo */}
           {/* ── LOGO ── */}
           {effectiveType === 'LOGO' && (
             <div className="space-y-3">
@@ -380,6 +474,9 @@ function OverlayFormModal({
                   </div>
                 </div>
               )}
+              {config.position !== 'custom' && (
+                <OffsetInputs config={config} setCfg={setCfg} />
+              )}
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-xs text-slate-400 mb-1">Ancho (px, 0=original)</label>
@@ -393,11 +490,9 @@ function OverlayFormModal({
                 </div>
               </div>
 
-              {/* Logo upload — visible siempre (creación Y edición) */}
+              {/* Logo upload */}
               <div>
                 <label className="block text-xs font-medium text-slate-400 mb-1">Imagen del logo</label>
-
-                {/* Preview: imagen guardada o previsualización local (antes de guardar) */}
                 {(pendingLogoPreview || config.imageUrl) && (
                   <img
                     src={pendingLogoPreview ?? config.imageUrl}
@@ -405,7 +500,6 @@ function OverlayFormModal({
                     className="h-14 object-contain rounded mb-2 border border-surface-600 bg-surface-900 p-1"
                   />
                 )}
-
                 <button
                   type="button"
                   onClick={() => logoRef.current?.click()}
@@ -428,7 +522,6 @@ function OverlayFormModal({
                   className="hidden"
                   onChange={handleLogoFileSelect}
                 />
-
                 {!isEdit && pendingLogo && (
                   <p className="text-xs text-green-400 mt-1 flex items-center gap-1">
                     <Upload className="w-3 h-3" /> La imagen se subirá al crear el overlay.
@@ -459,7 +552,7 @@ function OverlayFormModal({
                   {POSITIONS_XY.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
                 </select>
               </div>
-              {config.position === 'custom' && (
+              {config.position === 'custom' ? (
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-xs text-slate-400 mb-1">X (px)</label>
@@ -472,6 +565,8 @@ function OverlayFormModal({
                       className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
                   </div>
                 </div>
+              ) : (
+                <OffsetInputs config={config} setCfg={setCfg} />
               )}
               <div className="grid grid-cols-2 gap-2">
                 <div>
@@ -486,11 +581,7 @@ function OverlayFormModal({
                     className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500" />
                 </div>
               </div>
-              <div>
-                <label className="block text-xs text-slate-400 mb-1">Color fondo (FFmpeg: black@0.5, #000000@0.7…)</label>
-                <input value={config.bgColor ?? 'black@0.5'} onChange={e => setCfg('bgColor', e.target.value)}
-                  className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
-              </div>
+              <BgColorField value={config.bgColor ?? 'black@0.5'} onChange={v => setCfg('bgColor', v)} />
               <label className="flex items-center gap-2 cursor-pointer">
                 <input type="checkbox" checked={!!config.bold} onChange={e => setCfg('bold', e.target.checked)}
                   className="rounded border-surface-600" />
@@ -555,9 +646,10 @@ function OverlayFormModal({
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-xs font-medium text-slate-400 mb-1">Formato</label>
-                  <select value={config.format ?? 'time'} onChange={e => setCfg('format', e.target.value)}
+                  <select value={config.format ?? 'time_short'} onChange={e => setCfg('format', e.target.value)}
                     className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500">
-                    <option value="time">Solo hora (HH:MM:SS)</option>
+                    <option value="time_short">Solo hora (HH:MM)</option>
+                    <option value="time">Hora + segundos (HH:MM:SS)</option>
                     <option value="datetime">Fecha y hora (DD/MM/YYYY HH:MM:SS)</option>
                   </select>
                 </div>
@@ -569,7 +661,7 @@ function OverlayFormModal({
                   </select>
                 </div>
               </div>
-              {config.position === 'custom' && (
+              {config.position === 'custom' ? (
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-xs text-slate-400 mb-1">X (px)</label>
@@ -582,6 +674,8 @@ function OverlayFormModal({
                       className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
                   </div>
                 </div>
+              ) : (
+                <OffsetInputs config={config} setCfg={setCfg} />
               )}
               <div>
                 <label className="block text-xs font-medium text-slate-400 mb-1">Zona horaria</label>
@@ -590,7 +684,7 @@ function OverlayFormModal({
                   <option value="America/Argentina/Buenos_Aires">Argentina (UTC-3)</option>
                   <option value="America/Sao_Paulo">Brasil — São Paulo (UTC-3)</option>
                   <option value="America/Santiago">Chile (UTC-4/-3)</option>
-                  <option value="America/Lima">Perú / Colombia / Ecuador (UTC-5)</option>
+                  <option value="America/Lima">Perú / Ecuador (UTC-5)</option>
                   <option value="America/Bogota">Colombia (UTC-5)</option>
                   <option value="America/Caracas">Venezuela (UTC-4)</option>
                   <option value="America/Mexico_City">México Centro (UTC-6/-5)</option>
@@ -612,11 +706,96 @@ function OverlayFormModal({
                     className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
                 </div>
               </div>
-              <div>
-                <label className="block text-xs text-slate-400 mb-1">Color fondo</label>
-                <input value={config.bgColor ?? 'black@0.6'} onChange={e => setCfg('bgColor', e.target.value)}
-                  className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+              <BgColorField value={config.bgColor ?? 'black@0.6'} onChange={v => setCfg('bgColor', v)} />
+            </div>
+          )}
+
+          {/* ── TEMPERATURE ── */}
+          {effectiveType === 'TEMPERATURE' && (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Ciudad</label>
+                  <input
+                    value={config.city ?? 'Buenos Aires'}
+                    onChange={e => setCfg('city', e.target.value)}
+                    placeholder="Buenos Aires, Madrid, New York…"
+                    className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Unidad</label>
+                  <select
+                    value={config.unit ?? 'celsius'}
+                    onChange={e => setCfg('unit', e.target.value)}
+                    className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
+                  >
+                    <option value="celsius">Celsius (°C)</option>
+                    <option value="fahrenheit">Fahrenheit (°F)</option>
+                  </select>
+                </div>
               </div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={config.showUnit !== false}
+                  onChange={e => setCfg('showUnit', e.target.checked)}
+                  className="rounded border-surface-600"
+                />
+                <span className="text-xs text-slate-300">Mostrar unidad (°C / °F)</span>
+              </label>
+              <div>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Posición</label>
+                <select
+                  value={config.position ?? 'top-right'}
+                  onChange={e => setCfg('position', e.target.value)}
+                  className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
+                >
+                  {POSITIONS_XY.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                </select>
+              </div>
+              {config.position === 'custom' ? (
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">X (px)</label>
+                    <input type="number" value={config.x ?? 10} onChange={e => setCfg('x', +e.target.value)}
+                      className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Y (px)</label>
+                    <input type="number" value={config.y ?? 10} onChange={e => setCfg('y', +e.target.value)}
+                      className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                  </div>
+                </div>
+              ) : (
+                <OffsetInputs config={config} setCfg={setCfg} />
+              )}
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Tamaño fuente (px)</label>
+                  <input
+                    type="number" min={12} max={96}
+                    value={config.fontSize ?? 28}
+                    onChange={e => setCfg('fontSize', +e.target.value)}
+                    className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Color texto</label>
+                  <input
+                    value={config.fontColor ?? 'white'}
+                    onChange={e => setCfg('fontColor', e.target.value)}
+                    className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
+                  />
+                </div>
+              </div>
+              <BgColorField value={config.bgColor ?? 'black@0.6'} onChange={v => setCfg('bgColor', v)} />
+              <p className="text-xs text-slate-500 flex items-start gap-1.5 pt-1">
+                <Info className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-slate-400" />
+                Temperatura obtenida de wttr.in, actualizada cada 10 min.
+                Para mostrarla junto al reloj: usá la misma posición y ajustá el desplazamiento X
+                (ej: Reloj offsetX=0, Temperatura offsetX=−80).
+              </p>
             </div>
           )}
 
@@ -775,7 +954,7 @@ export default function OverlaysPage() {
             <Layers className="w-10 h-10 text-slate-600 mx-auto mb-3" />
             <h3 className="text-sm font-semibold text-white mb-1">Sin overlays</h3>
             <p className="text-xs text-slate-500 mb-4">
-              Agregá un logo, texto, reloj o ticker para superponerlos sobre la señal en vivo.
+              Agregá un logo, texto, reloj, temperatura o ticker para superponerlos sobre la señal en vivo.
             </p>
             <button
               onClick={handleOpenCreate}

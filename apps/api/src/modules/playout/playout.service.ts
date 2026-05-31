@@ -41,6 +41,8 @@ interface PlayoutSession {
   scheduleChangePending: boolean;
   /** Timer del watcher de schedule */
   scheduleWatchTimer: ReturnType<typeof setTimeout> | null;
+  /** Timer de refresco periódico de temperatura (TEMPERATURE overlays) */
+  tempRefreshTimer: ReturnType<typeof setTimeout> | null;
   // ─── Ingesta ──────────────────────────────────────────────────
   /** ID de la fuente de ingesta activa (null = programación normal) */
   activeIngestId: string | null;
@@ -153,6 +155,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       activeScheduleId: null,
       scheduleChangePending: false,
       scheduleWatchTimer: null,
+      tempRefreshTimer: null,
       activeIngestId: null,
       ingestProcess: null,
       ytDlpProcess: null,
@@ -213,6 +216,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       if (session.scheduleWatchTimer) {
         clearTimeout(session.scheduleWatchTimer);
         session.scheduleWatchTimer = null;
+      }
+      // Cancelar timer de refresco de temperatura
+      if (session.tempRefreshTimer) {
+        clearTimeout(session.tempRefreshTimer);
+        session.tempRefreshTimer = null;
       }
       // Matar proceso de ingesta si existe
       if (session.ytDlpProcess && !session.ytDlpProcess.killed) {
@@ -529,6 +537,17 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     this.log(session, overlayFilter
       ? `Overlays activos: ${overlays.length} → filter_complex`
       : 'Sin overlays → encode directo');
+
+    // Inicializar archivos de temperatura para overlays TEMPERATURE.
+    // FFmpeg usa textfile=+reload=1 para leer el valor en cada frame.
+    // El archivo debe existir ANTES de arrancar FFmpeg.
+    const effectiveOvs = overlayFilter ? overlays.filter(o => o.enabled) : [];
+    for (const ov of effectiveOvs) {
+      if (ov.type === OverlayType.TEMPERATURE) {
+        await this.writeTempFile(session, ov);
+      }
+    }
+    this.startTempRefresh(session, effectiveOvs);
 
     // 6. FFmpeg HLS — encode único desde MP4 originales, sin pre-normalización
     const m3u8Path = path.join(session.hlsDir, 'index.m3u8');
@@ -1076,10 +1095,16 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
       } else if (ov.type === OverlayType.CLOCK) {
         // expansion=strftime: drawtext evalúa la cadena como strftime() usando el TZ
-        // del proceso (ver ffmpegEnv más arriba). %T = %H:%M:%S sin necesidad de escapes.
-        // Para datetime los ':' dentro del formato SÍ deben escaparse como '\:' porque
-        // son separadores de opciones en la sintaxis de filtros FFmpeg.
-        const fmt = cfg.format === 'datetime' ? '%d/%m/%Y %H\\:%M\\:%S' : '%T';
+        // del proceso (ver ffmpegEnv más arriba).
+        // time_short → %R  (HH:MM, sin segundos) ← default
+        // time        → %T  (HH:MM:SS)
+        // datetime    → fecha + hora completa
+        // Los ':' en los formatos de fecha deben escaparse con '\:' (separadores de opciones FFmpeg).
+        const fmt = cfg.format === 'datetime'
+          ? '%d/%m/%Y %H\\:%M\\:%S'
+          : cfg.format === 'time'
+            ? '%T'
+            : '%R'; // default: time_short
         const box = `:box=1:boxcolor=${cfg.bgColor ?? 'black@0.6'}:boxborderw=10`;
         filterParts.push(
           `[${currentStream}]drawtext=fontfile=${FONT_BOLD}:text=${fmt}:expansion=strftime:fontsize=${cfg.fontSize ?? 28}:fontcolor=${cfg.fontColor ?? 'white'}:${this.textXY(cfg)}${box}:fix_bounds=1[${nextStream}]`,
@@ -1100,6 +1125,16 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         );
         filterParts.push(
           `[${barLabel}]drawtext=fontfile=${FONT}:text=${text}:fontsize=${cfg.fontSize ?? 20}:fontcolor=${cfg.fontColor ?? 'white'}:x=${scrollX}:y=${textY}:fix_bounds=1[${nextStream}]`,
+        );
+
+      } else if (ov.type === OverlayType.TEMPERATURE) {
+        // TEMPERATURE: lee la temperatura desde un archivo temporal actualizado periódicamente.
+        // textfile= + reload=1 → FFmpeg re-lee el archivo en cada frame (~10B, costo mínimo).
+        // El archivo es escrito por writeTempFile() antes de arrancar y por startTempRefresh() cada 10 min.
+        const tempFile = `/tmp/cloudtv-wtemp-${session.channelId}-${ov.id}.txt`;
+        const box      = `:box=1:boxcolor=${cfg.bgColor ?? 'black@0.6'}:boxborderw=10`;
+        filterParts.push(
+          `[${currentStream}]drawtext=fontfile=${FONT_BOLD}:textfile=${tempFile}:reload=1:fontsize=${cfg.fontSize ?? 28}:fontcolor=${cfg.fontColor ?? 'white'}:${this.textXY(cfg)}${box}:fix_bounds=1[${nextStream}]`,
         );
 
       } else {
@@ -1123,26 +1158,36 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
   // ─── Helpers posición ──────────────────────────────────────────
 
   private logoXY(cfg: any): string {
-    const p = 10;
+    const p  = 10;
+    const ox = cfg.offsetX ?? 0;
+    const oy = cfg.offsetY ?? 0;
+    const xOff = ox >= 0 ? `+${ox}` : `${ox}`;
+    const yOff = oy >= 0 ? `+${oy}` : `${oy}`;
     switch (cfg.position ?? 'top-left') {
-      case 'top-right':    return `W-w-${p}:${p}`;
-      case 'bottom-left':  return `${p}:H-h-${p}`;
-      case 'bottom-right': return `W-w-${p}:H-h-${p}`;
-      case 'center':       return `(W-w)/2:(H-h)/2`;
+      case 'top-right':    return `W-w-${p}${xOff}:${p}${yOff}`;
+      case 'bottom-left':  return `${p}${xOff}:H-h-${p}${yOff}`;
+      case 'bottom-right': return `W-w-${p}${xOff}:H-h-${p}${yOff}`;
+      case 'center':       return `(W-w)/2${xOff}:(H-h)/2${yOff}`;
       case 'custom':       return `${cfg.x ?? p}:${cfg.y ?? p}`;
-      default:             return `${p}:${p}`;
+      default:             return `${p}${xOff}:${p}${yOff}`;
     }
   }
 
   private textXY(cfg: any): string {
-    const p = 10;
+    const p  = 10;
+    const ox = cfg.offsetX ?? 0;
+    const oy = cfg.offsetY ?? 0;
+    // xOff/yOff: desplazamiento adicional sobre la posición ancla.
+    // Positivo X = mover a la derecha; positivo Y = mover hacia abajo.
+    const xOff = ox >= 0 ? `+${ox}` : `${ox}`;
+    const yOff = oy >= 0 ? `+${oy}` : `${oy}`;
     switch (cfg.position ?? 'top-left') {
-      case 'top-right':    return `x=W-text_w-${p}:y=${p}`;
-      case 'bottom-left':  return `x=${p}:y=H-text_h-${p}`;
-      case 'bottom-right': return `x=W-text_w-${p}:y=H-text_h-${p}`;
-      case 'center':       return `x=(W-text_w)/2:y=(H-text_h)/2`;
+      case 'top-right':    return `x=W-text_w-${p}${xOff}:y=${p}${yOff}`;
+      case 'bottom-left':  return `x=${p}${xOff}:y=H-text_h-${p}${yOff}`;
+      case 'bottom-right': return `x=W-text_w-${p}${xOff}:y=H-text_h-${p}${yOff}`;
+      case 'center':       return `x=(W-text_w)/2${xOff}:y=(H-text_h)/2${yOff}`;
       case 'custom':       return `x=${cfg.x ?? p}:y=${cfg.y ?? p}`;
-      default:             return `x=${p}:y=${p}`;
+      default:             return `x=${p}${xOff}:y=${p}${yOff}`;
     }
   }
 
@@ -1154,6 +1199,76 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       .replace(/,/g, '\\,')
       .replace(/\[/g, '\\[')
       .replace(/\]/g, '\\]');
+  }
+
+  // ─── Temperatura (TEMPERATURE overlay) ────────────────────────
+
+  /**
+   * Obtiene la temperatura actual de una ciudad desde wttr.in y la escribe
+   * en un archivo temporal que FFmpeg lee frame a frame con textfile=+reload=1.
+   * Si la petición falla, escribe "--°C" / "--°F" para que el overlay muestre
+   * algo en lugar de crashear.
+   */
+  private async writeTempFile(session: PlayoutSession, overlay: Overlay): Promise<void> {
+    const cfg      = overlay.config as any;
+    const city     = ((cfg.city as string) ?? 'Buenos Aires').trim();
+    const isFahr   = (cfg.unit as string) === 'fahrenheit';
+    const showUnit = cfg.showUnit !== false;
+    const filePath = `/tmp/cloudtv-wtemp-${session.channelId}-${overlay.id}.txt`;
+
+    let content = isFahr ? '--°F' : '--°C';
+    try {
+      const controller = new AbortController();
+      const timer      = setTimeout(() => controller.abort(), 8_000);
+      const resp = await fetch(
+        `https://wttr.in/${encodeURIComponent(city)}?format=j1`,
+        { signal: controller.signal },
+      );
+      clearTimeout(timer);
+      if (resp.ok) {
+        const json = await resp.json() as any;
+        const cond = json.current_condition?.[0];
+        if (cond) {
+          const raw     = isFahr ? (cond.temp_F as string) : (cond.temp_C as string);
+          const unitCh  = isFahr ? 'F' : 'C';
+          content = showUnit ? `${raw}°${unitCh}` : `${raw}°`;
+        }
+      }
+      this.log(session, `  ✓ Temperatura "${overlay.name}" (${city}): ${content}`);
+    } catch (err: any) {
+      this.log(session, `  WARN: Temperatura "${overlay.name}" no disponible → ${content} (${err?.message ?? err})`);
+    }
+
+    await fs.writeFile(filePath, content, 'utf8');
+  }
+
+  /**
+   * Inicia un timer que actualiza el archivo de temperatura cada 10 minutos.
+   * Se llama tras cada launchFfmpeg para resetear el ciclo.
+   * Si no hay overlays TEMPERATURE activos, cancela cualquier timer previo.
+   */
+  private startTempRefresh(session: PlayoutSession, enabledOverlays: Overlay[]): void {
+    if (session.tempRefreshTimer) {
+      clearTimeout(session.tempRefreshTimer);
+      session.tempRefreshTimer = null;
+    }
+
+    const tempOvs = enabledOverlays.filter(o => o.type === OverlayType.TEMPERATURE);
+    if (tempOvs.length === 0) return;
+
+    const REFRESH_MS = 10 * 60 * 1_000; // 10 minutos
+
+    const refresh = async () => {
+      if (session.stopping || !this.sessions.has(session.channelId)) return;
+      for (const ov of tempOvs) {
+        await this.writeTempFile(session, ov).catch(() => {/* silencioso */});
+      }
+      if (!session.stopping && this.sessions.has(session.channelId)) {
+        session.tempRefreshTimer = setTimeout(refresh, REFRESH_MS);
+      }
+    };
+
+    session.tempRefreshTimer = setTimeout(refresh, REFRESH_MS);
   }
 
   // ─── Log helper ────────────────────────────────────────────────
