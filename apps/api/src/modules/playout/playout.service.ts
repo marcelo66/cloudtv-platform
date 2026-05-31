@@ -315,6 +315,8 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     await fs.mkdir(videosDir, { recursive: true });
 
     const downloadedMp4s: string[] = [];
+    // Map correcto índice→path (downloadedMp4s puede tener huecos si fallan descargas)
+    const downloadedMap  = new Map<number, string>();
     // Items que aún no tienen norm en caché → se normalizarán en background mientras el stream corre
     const pendingNorm: Array<{ rawPath: string; normPath: string }> = [];
     let totalDuration = 0;
@@ -336,6 +338,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       if (normExists) {
         this.log(session, `  ✓ [norm] ${i + 1}/${playlist.items.length} · ${dur}s`);
         downloadedMp4s.push(normPath);
+        downloadedMap.set(i, normPath);
         if (item.video.duration) totalDuration += item.video.duration;
         continue;
       }
@@ -356,6 +359,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       // 3. Raw disponible → usar ahora; normalizar en background para próxima ejecución
       this.log(session, `  ✓ [raw] ${i + 1}/${playlist.items.length} · ${dur}s`);
       downloadedMp4s.push(rawPath);
+      downloadedMap.set(i, rawPath);
       pendingNorm.push({ rawPath, normPath });
       if (item.video.duration) totalDuration += item.video.duration;
     }
@@ -479,6 +483,8 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         const adPath = adDownloads.get(spot.videoId);
         if (!adPath) continue;
         concatLines.push(`file '${adPath}'`);
+        // duration hint: permite al concat demuxer calcular timestamps exactos sin analizar EOF
+        if (spot.video.duration) concatLines.push(`duration ${spot.video.duration.toFixed(6)}`);
         totalAdsInjected++;
         this.adBlocksService.recordImpression(
           spot.id, adBlock.id, session.channelId,
@@ -494,10 +500,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
     // 4b. Contenido: videos con cue-points y cortes de intervalo automático
     for (let i = 0; i < playlist.items.length; i++) {
-      const item    = playlist.items[i];
-      const mp4Path = downloadedMp4s[i];
+      const item      = playlist.items[i];
+      const mp4Path   = downloadedMap.get(i); // índice correcto incluso si hubo descargas fallidas
       if (!mp4Path) continue;
-      const videoId      = item.video.id;
+      const videoId       = item.video.id;
       const videoDuration = item.video.duration ?? 0;
 
       const videoCues = cuePoints.filter((cp) => cp.videoId === videoId);
@@ -512,20 +518,31 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
       // Video principal (con posibles MID_ROLLs de cue points)
       if (midRolls.length === 0) {
+        // Duración efectiva del segmento: del trimStart al trimEnd (o duración total)
+        const segStart = item.trimStart ?? 0;
+        const segEnd   = item.trimEnd   ?? videoDuration;
+        const segDur   = segEnd - segStart;
         concatLines.push(`file '${mp4Path}'`);
+        if (segDur > 0) concatLines.push(`duration ${segDur.toFixed(6)}`);
         if (item.trimStart) concatLines.push(`inpoint ${item.trimStart}`);
         if (item.trimEnd)   concatLines.push(`outpoint ${item.trimEnd}`);
       } else {
         let inpoint: number = item.trimStart ?? 0;
         for (const cp of midRolls) {
           const outpoint = cp.timeOffset!;
+          const segDur   = outpoint - inpoint;
           concatLines.push(`file '${mp4Path}'`);
+          if (segDur > 0) concatLines.push(`duration ${segDur.toFixed(6)}`);
           if (inpoint > 0) concatLines.push(`inpoint ${inpoint}`);
           concatLines.push(`outpoint ${outpoint}`);
           await insertBlock(cp.adBlock, 'MID_ROLL');
           inpoint = outpoint;
         }
+        // Último segmento: desde último mid-roll hasta trimEnd/fin
+        const lastEnd = item.trimEnd ?? videoDuration;
+        const lastDur = lastEnd - inpoint;
         concatLines.push(`file '${mp4Path}'`);
+        if (lastDur > 0) concatLines.push(`duration ${lastDur.toFixed(6)}`);
         if (inpoint > 0)   concatLines.push(`inpoint ${inpoint}`);
         if (item.trimEnd)  concatLines.push(`outpoint ${item.trimEnd}`);
       }
@@ -547,15 +564,29 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       await insertBlock(scheduleEntry.postAdBlock, 'POST_ROLL');
     }
 
-    // NOTA: NO usar "ffconcat version 1.0" header aquí.
-    // Con -stream_loop -1 el concat demuxer necesita el modo clásico (-f concat)
-    // para mantener timestamps continuos en el loop infinito.
-    // El header "ffconcat version 1.0" cambia el manejo de timestamps y rompe
-    // el loopeo cuando el playlist termina su primer ciclo.
-    await fs.writeFile(concatPath, concatLines.join('\n') + '\n');
+    // ── Expansión del concat para cobertura ~24h sin -stream_loop ────────────────
+    //
+    // -stream_loop -1 causa una DISCONTINUIDAD PTS al hacer wrap-around:
+    //   los timestamps saltan hacia atrás (ej: 3600s → 0s), el HLS muxer
+    //   inserta EXT-X-DISCONTINUITY o el player detecta el salto y re-bufferiza.
+    //
+    // Solución: repetir las entradas del concat para cubrir ~24h de emisión sin
+    // ningún wrap-around. Cuando FFmpeg termina (code=0), el close handler
+    // reinicia el proceso en 1 s con un nuevo concat expandido.
+    const COVERAGE_SECONDS = 24 * 3600; // 24 horas de cobertura continua
+    const loopCount = totalDuration > 0
+      ? Math.max(1, Math.ceil(COVERAGE_SECONDS / totalDuration))
+      : 50; // fallback cuando las duraciones son desconocidas
+    const expandedLines = loopCount > 1
+      ? Array.from({ length: loopCount }, () => concatLines).flat()
+      : concatLines;
+    if (loopCount > 1) {
+      this.log(session, `Playlist expandida: ${loopCount}× → ~${Math.round(totalDuration * loopCount / 3600)}h de emisión continua sin wrap-around`);
+    }
+    await fs.writeFile(concatPath, expandedLines.join('\n') + '\n');
     this.log(
       session,
-      `concat.txt: ${downloadedMp4s.length} video(s)${totalAdsInjected > 0 ? ` + ${totalAdsInjected} spot(s) publicitario(s)` : ' (sin publicidad)'}`,
+      `concat.txt: ${downloadedMap.size} video(s)${totalAdsInjected > 0 ? ` + ${totalAdsInjected} spot(s) publicitario(s)` : ' (sin publicidad)'}`,
     );
 
     // 4. Calidad de emisión (ya leída en el paso 2 para la normalización)
@@ -650,12 +681,14 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     //      Mismo resultado visual que A sin overlays; la normalización corre en
     //      background y en el próximo reinicio se activa la ruta B.
     //
+    // Nota: NO se usa -stream_loop -1.
+    // El concat.txt tiene las entradas repetidas para ~24h (ver paso 4 arriba).
+    // Al terminar (code=0), el close handler reinicia el proceso automáticamente.
     const args: string[] = overlayFilter
       ? [
           // Ruta A: decode + filter_complex + encode
           '-loglevel', 'warning',
           '-re',
-          '-stream_loop', '-1',
           ...inputFlags,
           '-f', 'concat', '-safe', '0', '-i', concatPath,
           ...overlayFilter.extraInputArgs,
@@ -670,7 +703,6 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
             // Ruta B: stream-copy — bitstream pasa directo al muxer HLS sin decode/encode
             '-loglevel', 'warning',
             '-re',
-            '-stream_loop', '-1',
             '-f', 'concat', '-safe', '0', '-i', concatPath,
             '-c', 'copy',
             ...hlsArgs,
@@ -679,7 +711,6 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
             // Ruta C: re-encode en tiempo real (archivos raw, primer arranque)
             '-loglevel', 'warning',
             '-re',
-            '-stream_loop', '-1',
             ...inputFlags,
             '-f', 'concat', '-safe', '0', '-i', concatPath,
             '-vf', normalizeVf,
@@ -789,8 +820,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      // ── Caso 2: salida limpia code=0 (playlist terminó) → reinicio sin fallo
-      // Con -stream_loop -1 esto no debería ocurrir, pero lo manejamos igual
+      // ── Caso 2: salida limpia code=0 (concat 24h completado) → reinicio sin fallo
       if (isCleanExit) {
         this.log(session, 'Playlist completada (code=0) → reiniciando en 1s...');
         this.stopRtmpOutputs(session, false);
