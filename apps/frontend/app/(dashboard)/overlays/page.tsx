@@ -15,6 +15,7 @@ import {
   ToggleRight,
   Upload,
   X,
+  Info,
 } from 'lucide-react';
 import { Header } from '@/components/dashboard/Header';
 import apiClient from '@/lib/api-client';
@@ -86,7 +87,7 @@ const DEFAULT_CONFIG: Record<OverlayType, Record<string, any>> = {
   LOGO: { position: 'top-left', width: 120, opacity: 1 },
   TEXT_STATIC: { text: '', position: 'bottom-right', fontSize: 24, fontColor: 'white', bgColor: 'black@0.5', bold: false },
   TEXT_SCROLL: { text: '', position: 'bottom', fontSize: 20, fontColor: 'white', bgColor: 'black@0.7', speed: 80, barHeight: 36 },
-  CLOCK: { position: 'top-right', fontSize: 28, fontColor: 'white', bgColor: 'black@0.6', format: 'time' },
+  CLOCK: { position: 'top-right', fontSize: 28, fontColor: 'white', bgColor: 'black@0.6', format: 'time', timezone: 'America/Argentina/Buenos_Aires' },
   TICKER: { text: '', position: 'bottom', fontSize: 20, fontColor: 'white', bgColor: 'black@0.7', speed: 80, barHeight: 36 },
 };
 
@@ -551,20 +552,22 @@ function OverlayFormModal({
           {/* ── CLOCK ── */}
           {effectiveType === 'CLOCK' && (
             <div className="space-y-3">
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">Formato</label>
-                <select value={config.format ?? 'time'} onChange={e => setCfg('format', e.target.value)}
-                  className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500">
-                  <option value="time">Solo hora (HH:MM:SS)</option>
-                  <option value="datetime">Fecha y hora (DD-MM-YYYY HH:MM:SS)</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">Posición</label>
-                <select value={config.position ?? 'top-right'} onChange={e => setCfg('position', e.target.value)}
-                  className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500">
-                  {POSITIONS_XY.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
-                </select>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Formato</label>
+                  <select value={config.format ?? 'time'} onChange={e => setCfg('format', e.target.value)}
+                    className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500">
+                    <option value="time">Solo hora (HH:MM:SS)</option>
+                    <option value="datetime">Fecha y hora (DD/MM/YYYY HH:MM:SS)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Posición</label>
+                  <select value={config.position ?? 'top-right'} onChange={e => setCfg('position', e.target.value)}
+                    className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500">
+                    {POSITIONS_XY.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                  </select>
+                </div>
               </div>
               {config.position === 'custom' && (
                 <div className="grid grid-cols-2 gap-2">
@@ -580,6 +583,23 @@ function OverlayFormModal({
                   </div>
                 </div>
               )}
+              <div>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Zona horaria</label>
+                <select value={config.timezone ?? 'America/Argentina/Buenos_Aires'} onChange={e => setCfg('timezone', e.target.value)}
+                  className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500">
+                  <option value="America/Argentina/Buenos_Aires">Argentina (UTC-3)</option>
+                  <option value="America/Sao_Paulo">Brasil — São Paulo (UTC-3)</option>
+                  <option value="America/Santiago">Chile (UTC-4/-3)</option>
+                  <option value="America/Lima">Perú / Colombia / Ecuador (UTC-5)</option>
+                  <option value="America/Bogota">Colombia (UTC-5)</option>
+                  <option value="America/Caracas">Venezuela (UTC-4)</option>
+                  <option value="America/Mexico_City">México Centro (UTC-6/-5)</option>
+                  <option value="America/New_York">Nueva York (UTC-5/-4)</option>
+                  <option value="America/Los_Angeles">Los Ángeles (UTC-8/-7)</option>
+                  <option value="Europe/Madrid">España (UTC+1/+2)</option>
+                  <option value="UTC">UTC</option>
+                </select>
+              </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-xs text-slate-400 mb-1">Tamaño fuente (px)</label>
@@ -693,6 +713,16 @@ export default function OverlaysPage() {
       <Header title="Overlays" subtitle="Logos, textos y gráficos sobre la señal en vivo" />
 
       <div className="flex-1 p-6 overflow-y-auto space-y-6">
+
+        {/* Aviso: los overlays se aplican al reiniciar el canal */}
+        <div className="flex items-start gap-2.5 rounded-xl bg-amber-500/8 border border-amber-500/20 px-4 py-3">
+          <Info className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
+          <p className="text-xs text-amber-300">
+            Los cambios en overlays toman efecto la próxima vez que el canal se inicie o reinicie.
+            Si el canal está en vivo, detené y volvé a iniciar desde{' '}
+            <a href="/channel" className="underline font-medium">Canal en vivo</a>.
+          </p>
+        </div>
 
         {/* Canal + botón agregar */}
         <div className="flex items-center gap-3 flex-wrap">

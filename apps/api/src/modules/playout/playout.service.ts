@@ -629,9 +629,17 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     let spawnedAt = Date.now(); // se ajusta en el evento 'spawn'
     const hadOverlays = !!overlayFilter;
 
+    // Zona horaria para el reloj en tiempo real (CLOCK overlay).
+    // Tomar la timezone del primer overlay CLOCK activo (si existe).
+    const clockOv = overlays.find(o => o.type === OverlayType.CLOCK && o.enabled);
+    const ffmpegEnv = clockOv && (clockOv.config as any)?.timezone
+      ? { ...process.env, TZ: (clockOv.config as any).timezone as string }
+      : process.env;
+
     const proc = spawn('ffmpeg', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       cwd: session.hlsDir,
+      env: ffmpegEnv,
     });
     session.process = proc;
 
@@ -1024,9 +1032,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
     const filterParts: string[] = [];
     const extraInputPaths: string[] = [];
-    // Primer paso: normalizar resolución/fps igual que en el camino sin overlays
+    // Normalización: misma cadena que el path sin overlays + setpts para timestamps limpios
     filterParts.push(
-      `[0:v]scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,fps=25,format=yuv420p[norm]`,
+      `[0:v]scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,setpts=PTS-STARTPTS,fps=25,format=yuv420p[norm]`,
     );
     let currentStream = 'norm';
     let idx = 0;
@@ -1040,10 +1048,19 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         if (!localPath) continue;
         const inputIdx = extraInputPaths.length + 1;
         extraInputPaths.push(localPath);
-        const pos = this.logoXY(cfg);
-        if (cfg.width) {
-          const sl = `sc${idx}`;
+        const pos     = this.logoXY(cfg);
+        const opacity = cfg.opacity ?? 1;
+        const sl      = `sc${idx}`;
+
+        // Construir pipeline de pre-procesado del logo (scale + opacidad)
+        if (cfg.width && opacity < 1) {
+          filterParts.push(`[${inputIdx}:v]scale=${cfg.width}:-1,format=rgba,colorchannelmixer=aa=${opacity.toFixed(2)}[${sl}]`);
+          filterParts.push(`[${currentStream}][${sl}]overlay=${pos}:eof_action=repeat[${nextStream}]`);
+        } else if (cfg.width) {
           filterParts.push(`[${inputIdx}:v]scale=${cfg.width}:-1[${sl}]`);
+          filterParts.push(`[${currentStream}][${sl}]overlay=${pos}:eof_action=repeat[${nextStream}]`);
+        } else if (opacity < 1) {
+          filterParts.push(`[${inputIdx}:v]format=rgba,colorchannelmixer=aa=${opacity.toFixed(2)}[${sl}]`);
           filterParts.push(`[${currentStream}][${sl}]overlay=${pos}:eof_action=repeat[${nextStream}]`);
         } else {
           filterParts.push(`[${currentStream}][${inputIdx}:v]overlay=${pos}:eof_action=repeat[${nextStream}]`);
@@ -1054,15 +1071,17 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         const font = cfg.bold ? FONT_BOLD : FONT;
         const box  = `:box=1:boxcolor=${cfg.bgColor ?? 'black@0.5'}:boxborderw=8`;
         filterParts.push(
-          `[${currentStream}]drawtext=fontfile=${font}:text=${text}:fontsize=${cfg.fontSize ?? 24}:fontcolor=${cfg.fontColor ?? 'white'}:${this.textXY(cfg)}${box}[${nextStream}]`,
+          `[${currentStream}]drawtext=fontfile=${font}:text=${text}:fontsize=${cfg.fontSize ?? 24}:fontcolor=${cfg.fontColor ?? 'white'}:${this.textXY(cfg)}${box}:fix_bounds=1[${nextStream}]`,
         );
 
       } else if (ov.type === OverlayType.CLOCK) {
-        const fmt  = cfg.format === 'datetime' ? '%d-%m-%Y %T' : '%T';
+        // El formato 'datetime' usa fecha + hora; 'time' solo hora
+        const fmt  = cfg.format === 'datetime' ? '%d/%m/%Y %H\\:%M\\:%S' : '%H\\:%M\\:%S';
+        // %{localtime\:FORMAT} → evalúa strftime(FORMAT) por frame con TZ del proceso
         const text = `%{localtime\\:${fmt}}`;
         const box  = `:box=1:boxcolor=${cfg.bgColor ?? 'black@0.6'}:boxborderw=10`;
         filterParts.push(
-          `[${currentStream}]drawtext=fontfile=${FONT_BOLD}:text=${text}:fontsize=${cfg.fontSize ?? 28}:fontcolor=${cfg.fontColor ?? 'white'}:${this.textXY(cfg)}${box}[${nextStream}]`,
+          `[${currentStream}]drawtext=fontfile=${FONT_BOLD}:text=${text}:fontsize=${cfg.fontSize ?? 28}:fontcolor=${cfg.fontColor ?? 'white'}:${this.textXY(cfg)}${box}:fix_bounds=1[${nextStream}]`,
         );
 
       } else if (ov.type === OverlayType.TEXT_SCROLL || ov.type === OverlayType.TICKER) {
@@ -1071,13 +1090,15 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         const isBot   = (cfg.position ?? 'bottom') !== 'top';
         const barY    = isBot ? `H-${barH}` : '0';
         const textY   = isBot ? `H-${barH}+(${barH}-text_h)/2` : `(${barH}-text_h)/2`;
+        // Fórmula: el texto arranca en el borde derecho y avanza speed px/s
+        // mod(...) garantiza que reinicia el ciclo al llegar al extremo izquierdo
         const scrollX = `W-mod(t*${cfg.speed ?? 80}\\,W+text_w)`;
         const barLabel = `bar${idx}`;
         filterParts.push(
           `[${currentStream}]drawbox=x=0:y=${barY}:w=W:h=${barH}:color=${cfg.bgColor ?? 'black@0.7'}:t=fill[${barLabel}]`,
         );
         filterParts.push(
-          `[${barLabel}]drawtext=fontfile=${FONT}:text=${text}:fontsize=${cfg.fontSize ?? 20}:fontcolor=${cfg.fontColor ?? 'white'}:x=${scrollX}:y=${textY}[${nextStream}]`,
+          `[${barLabel}]drawtext=fontfile=${FONT}:text=${text}:fontsize=${cfg.fontSize ?? 20}:fontcolor=${cfg.fontColor ?? 'white'}:x=${scrollX}:y=${textY}:fix_bounds=1[${nextStream}]`,
         );
 
       } else {
