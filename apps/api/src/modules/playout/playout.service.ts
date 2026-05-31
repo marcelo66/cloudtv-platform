@@ -301,24 +301,24 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     const qKeyEarly    = channelQualityEarly?.videoQuality ?? '480p';
     const qualityEarly = VIDEO_QUALITY[qKeyEarly] ?? VIDEO_QUALITY['480p'];
 
-    // ── 3. Descargar y normalizar al formato broadcast canónico ──────────────────────────────
+    // ── 3. Descargar y preparar archivos para emisión ────────────────────────────────────────
     //
-    // MOTOR DE CONTINUIDAD: todos los videos se convierten a formato IDÉNTICO antes de emitir.
-    //   • H.264 High Profile 4.0 · 25 fps · resolución del canal · yuv420p
-    //   • GOP fijo 50 frames (keyframe cada 2 s) · sc_threshold=0 (sin keyframes extra)
-    //   • AAC 44100 Hz estéreo
-    //   • Timestamps desde 0 (avoid_negative_ts make_zero)
+    // HOT START: el stream arranca en cuanto los archivos están disponibles (descargados).
+    // La normalización al formato broadcast canónico se ejecuta en BACKGROUND, sin bloquear.
     //
-    // Con inputs idénticos el concat demuxer opera sin incompatibilidades y la salida
-    // puede ser stream-copy puro (sin re-encode) → transiciones frame-perfect.
+    // Primera ejecución  → archivos raw descargados → re-encode en tiempo real (inicia de inmediato)
+    // Ejecuciones posteriores → norm_{quality}_{id}.mp4 en caché → stream-copy sin decode/encode
     //
-    // El archivo normalizado se cachea por calidad + videoId.  Si ya existe en disco
-    // (reinicio rápido, cambio de overlays, etc.) se reutiliza sin re-normalizar.
+    // El archivo normalizado (norm_<quality>_<id>.mp4) se cachea por calidad + videoId.
+    // Una vez generado en background, el próximo reinicio lo detecta y usa stream-copy.
     const videosDir = path.join(session.hlsDir, 'videos');
     await fs.mkdir(videosDir, { recursive: true });
 
     const downloadedMp4s: string[] = [];
+    // Items que aún no tienen norm en caché → se normalizarán en background mientras el stream corre
+    const pendingNorm: Array<{ rawPath: string; normPath: string }> = [];
     let totalDuration = 0;
+
     for (let i = 0; i < playlist.items.length; i++) {
       if (session.stopping) return;
       const item    = playlist.items[i];
@@ -327,22 +327,20 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
       const videoId  = item.video.id;
       const dur      = item.video.duration?.toFixed(1) ?? '?';
-      // raw_<id>.mp4 → archivo original descargado (borrado al detener el canal)
-      // norm_<calidad>_<id>.mp4 → versión broadcast-ready (caché por sesión y calidad)
       const rawPath  = path.join(videosDir, `raw_${videoId}.mp4`);
       const normPath = path.join(videosDir, `norm_${qKeyEarly}_${videoId}.mp4`);
 
-      // 1. Reutilizar caché normalizado si existe (reinicio rápido, etc.)
+      // 1. Caché normalizado disponible → reutilizar (reinicio rápido, stream-copy)
       let normExists = false;
       try { await fs.access(normPath); normExists = true; } catch { /* no existe */ }
       if (normExists) {
-        this.log(session, `  ✓ [broadcast-ready] ${i + 1}/${playlist.items.length} · ${dur}s`);
+        this.log(session, `  ✓ [norm] ${i + 1}/${playlist.items.length} · ${dur}s`);
         downloadedMp4s.push(normPath);
         if (item.video.duration) totalDuration += item.video.duration;
         continue;
       }
 
-      // 2. Descargar original si no está en caché local
+      // 2. Descargar raw si no está en disco
       let rawExists = false;
       try { await fs.access(rawPath); rawExists = true; } catch { /* no existe */ }
       if (!rawExists) {
@@ -355,21 +353,23 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         }
       }
 
-      // 3. Normalizar a formato broadcast canónico (una vez; resultado en caché)
-      this.log(session, `  ⚙ Normalizando ${i + 1}/${playlist.items.length} (${dur}s) → ${qKeyEarly}…`);
-      try {
-        await this.normalizeVideoForBroadcast(rawPath, normPath, qualityEarly);
-        downloadedMp4s.push(normPath);
-        if (item.video.duration) totalDuration += item.video.duration;
-        this.log(session, `  ✓ [broadcast-ready] ${i + 1}/${playlist.items.length} · ${dur}s`);
-      } catch (err: any) {
-        // Fallback: usar raw si la normalización falla (no bloquear emisión)
-        this.log(session, `  WARN: normalización falló (${err.message}) → usando original sin normalizar`);
-        downloadedMp4s.push(rawPath);
-        if (item.video.duration) totalDuration += item.video.duration;
-      }
+      // 3. Raw disponible → usar ahora; normalizar en background para próxima ejecución
+      this.log(session, `  ✓ [raw] ${i + 1}/${playlist.items.length} · ${dur}s`);
+      downloadedMp4s.push(rawPath);
+      pendingNorm.push({ rawPath, normPath });
+      if (item.video.duration) totalDuration += item.video.duration;
     }
-    this.log(session, `Preparación completa: ${downloadedMp4s.length} video(s) · ${(totalDuration / 60).toFixed(1)} min total · calidad ${qKeyEarly}`);
+
+    // ¿Todos los archivos ya están en formato broadcast-ready?
+    const allNormalized = pendingNorm.length === 0;
+    if (allNormalized) {
+      this.log(session, `✓ Todo broadcast-ready → stream-copy disponible`);
+    } else {
+      this.log(session, `⚠ ${pendingNorm.length} video(s) sin normalizar → re-encode en tiempo real; normalización en background…`);
+      // Lanzar normalización en background — no bloquea el arranque del stream
+      this.runBackgroundNormalization(session, pendingNorm, qualityEarly);
+    }
+    this.log(session, `Preparación: ${downloadedMp4s.length} video(s) · ${(totalDuration / 60).toFixed(1)} min`);
 
     if (downloadedMp4s.length === 0) {
       this.log(session, 'ERROR: No se pudo descargar ningún video.');
@@ -617,42 +617,42 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       '-c:a', 'aac', '-b:a', quality.aBitrate, '-ar', '44100', '-ac', '2',
     ];
 
-    // Filtro de audio para el camino CON overlays (filter_complex).
-    // Los archivos ya están normalizados (AAC 44100 estéreo) pero aresample async
-    // compensa cualquier micro-drift de pts en la cadena de decode+filter+encode.
+    // Filtro de audio (decode+encode paths — overlays o re-encode de raw).
+    // aresample async=1000 compensa micro-drifts de pts entre clips concatenados.
+    // aformat convierte cualquier layout (mono, 5.1…) a estéreo.
     const audioFilter = 'aformat=channel_layouts=stereo,aresample=async=1000';
 
     // Para el camino con overlays: el audio se incluye dentro del mismo filter_complex
-    // (video overlay chain + audio downmix chain en paralelo, separados por ';')
     const finalFilterComplex = overlayFilter
       ? `${overlayFilter.filterComplex};[0:a]${audioFilter}[aout]`
       : null;
 
-    // Flags de tolerancia en el input: descarta paquetes corruptos (H264 AVCC start-code
-    // errors, AAC 5.1 frames inválidos) en lugar de propagar errores al encoder.
-    // -fflags +discardcorrupt : silencia "No start code is found" / "NAL unit" errors
-    // -fflags +genpts        : regenera PTS faltantes o corruptos
-    // -err_detect ignore_err : ignora errores no fatales en el decoder
+    // Filtro de video para el camino de re-encode sin overlays (archivos raw/mix).
+    // scale + pad → resolución exacta del canal; fps=25 + setpts → framerate y timestamps uniformes.
+    const normalizeVf = `scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,setpts=PTS-STARTPTS,fps=25,format=yuv420p`;
+
+    // Flags de tolerancia en el input: descarta paquetes corruptos / regenera PTS faltantes.
     const inputFlags = [
       '-fflags', '+genpts+discardcorrupt',
       '-err_detect', 'ignore_err',
     ];
 
-    // -re: leer a velocidad real (1×) → imprescindible para live HLS.
-    // Sin -re FFmpeg encodes 50× más rápido y los segmentos se generan en segundos:
-    // el playlist borra los viejos antes de que el player pueda cargarlos → 404.
-    // -stream_loop -1: bucle infinito del playlist para broadcast 24/7.
+    // ─── RUTAS FFmpeg ──────────────────────────────────────────────────────────────
     //
-    // RUTAS:
-    //   A) Con overlays  → decode + filter_complex + re-encode
-    //      Los archivos ya están normalizados (formato idéntico) → decode limpio
-    //   B) Sin overlays  → stream-copy (-c copy)
-    //      Los archivos broadcast-normalizados se pasan DIRECTAMENTE al muxer HLS.
-    //      No hay decode/encode: transiciones frame-perfect y CPU mínimo.
-    //      Req: todos los inputs deben ser H.264/AAC con GOP=50 fijo (garantizado
-    //      por normalizeVideoForBroadcast).
+    //   A) overlayFilter activo  → decode + filter_complex + encode
+    //      Funciona con archivos raw O normalizados indistintamente.
+    //
+    //   B) allNormalized + sin overlays → stream-copy (-c copy)
+    //      Cero decode/encode: transiciones frame-perfect, CPU mínimo.
+    //      Req: todos los archivos son norm_*.mp4 (H.264/AAC · GOP=50 fijo).
+    //
+    //   C) archivos raw presentes + sin overlays → re-encode en tiempo real
+    //      Mismo resultado visual que A sin overlays; la normalización corre en
+    //      background y en el próximo reinicio se activa la ruta B.
+    //
     const args: string[] = overlayFilter
       ? [
+          // Ruta A: decode + filter_complex + encode
           '-loglevel', 'warning',
           '-re',
           '-stream_loop', '-1',
@@ -665,21 +665,34 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           ...codecArgs,
           ...hlsArgs,
         ]
-      : [
-          // Stream-copy: bitstream H.264+AAC pasa directo al muxer HLS sin decode/encode.
-          // Los segmentos se abren en el primer keyframe tras hls_time segundos
-          // (GOP=50 ≈ 2 s garantiza segmentos de ~2 s bien alineados).
-          '-loglevel', 'warning',
-          '-re',
-          '-stream_loop', '-1',
-          '-f', 'concat', '-safe', '0', '-i', concatPath,
-          '-c', 'copy',
-          ...hlsArgs,
-        ];
+      : allNormalized
+        ? [
+            // Ruta B: stream-copy — bitstream pasa directo al muxer HLS sin decode/encode
+            '-loglevel', 'warning',
+            '-re',
+            '-stream_loop', '-1',
+            '-f', 'concat', '-safe', '0', '-i', concatPath,
+            '-c', 'copy',
+            ...hlsArgs,
+          ]
+        : [
+            // Ruta C: re-encode en tiempo real (archivos raw, primer arranque)
+            '-loglevel', 'warning',
+            '-re',
+            '-stream_loop', '-1',
+            ...inputFlags,
+            '-f', 'concat', '-safe', '0', '-i', concatPath,
+            '-vf', normalizeVf,
+            '-af', audioFilter,
+            ...codecArgs,
+            ...hlsArgs,
+          ];
 
     this.log(session, overlayFilter
       ? `Lanzando FFmpeg HLS + overlays (decode → filter → encode)…`
-      : `Lanzando FFmpeg HLS stream-copy (broadcast-ready, sin re-encode)…`);
+      : allNormalized
+        ? `Lanzando FFmpeg HLS stream-copy (broadcast-ready, sin re-encode)…`
+        : `Lanzando FFmpeg HLS re-encode (raw; normalización en background)…`);
     if (finalFilterComplex) {
       // Log diagnóstico: mostrar el filter_complex completo (video + audio) para detectar errores de sintaxis
       const fc = finalFilterComplex;
@@ -1394,6 +1407,39 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         },
       },
     });
+  }
+
+  /**
+   * Normaliza en background los archivos raw que aún no tienen caché norm_*.mp4.
+   * Se ejecuta de forma asíncrona mientras el stream ya está corriendo.
+   * Cuando termina, el próximo reinicio detectará todos los norm en caché
+   * y usará stream-copy (ruta B, sin decode/encode).
+   */
+  private runBackgroundNormalization(
+    session: PlayoutSession,
+    items: Array<{ rawPath: string; normPath: string }>,
+    quality: { scale: string; vBitrate: string; maxrate: string; bufsize: string; aBitrate: string },
+  ): void {
+    (async () => {
+      this.log(session, `[bg-norm] Iniciando normalización de ${items.length} video(s) en background…`);
+      let done = 0;
+      for (const { rawPath, normPath } of items) {
+        if (session.stopping || !this.sessions.has(session.channelId)) {
+          this.log(session, `[bg-norm] Cancelado (canal detenido)`);
+          return;
+        }
+        try {
+          await this.normalizeVideoForBroadcast(rawPath, normPath, quality);
+          done++;
+          this.log(session, `[bg-norm] ${done}/${items.length} listo → ${path.basename(normPath)}`);
+        } catch (err: any) {
+          this.log(session, `[bg-norm] WARN: falló ${path.basename(rawPath)}: ${err.message}`);
+        }
+      }
+      if (!session.stopping && this.sessions.has(session.channelId)) {
+        this.log(session, `[bg-norm] ✓ Todos normalizados. Próximo reinicio usará stream-copy.`);
+      }
+    })().catch(() => {});
   }
 
   /**
