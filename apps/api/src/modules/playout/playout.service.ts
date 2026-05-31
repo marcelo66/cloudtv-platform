@@ -354,6 +354,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           this.log(session, `  ERROR descargando ${key}: ${err.message}`);
           continue;
         }
+        // Asegurar faststart: si el moov no está al inicio, reescribir (stream-copy, rápido).
+        // Sin faststart, el concat demuxer hace seek hasta el final del archivo al abrirlo,
+        // congelando el pipeline de video durante varios segundos en archivos grandes.
+        await this.ensureFaststart(rawPath).catch(() => {});
       }
 
       // 3. Raw disponible → usar ahora; normalizar en background para próxima ejecución
@@ -1345,7 +1349,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     const fetchTemp = async () => {
       try {
         const controller = new AbortController();
-        const timer      = setTimeout(() => controller.abort(), 8_000);
+        const timer      = setTimeout(() => controller.abort(), 3_000); // 3 s — falla rápido si no hay red
         const resp = await fetch(
           `https://wttr.in/${encodeURIComponent(city)}?format=j1`,
           { signal: controller.signal },
@@ -1581,6 +1585,59 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
    *
    * Se llama UNA vez por spot al descargar; el resultado queda en caché.
    */
+
+  // ─── Faststart ─────────────────────────────────────────────────────────────
+
+  /**
+   * Comprueba si un MP4 tiene el átomo moov al inicio (faststart).
+   *
+   * Lee los primeros 64 KB del archivo. Si 'moov' NO aparece ahí, el archivo
+   * requiere faststart: el concat demuxer tendrá que hacer seek hasta el final
+   * del archivo para encontrar el moov, lo que congela el pipeline de video
+   * durante varios segundos en archivos grandes.
+   */
+  private async needsFaststart(filePath: string): Promise<boolean> {
+    try {
+      const PROBE = 65536; // 64 KB — más que suficiente para el átomo moov en archivos faststart
+      const buf   = Buffer.alloc(PROBE);
+      const fh    = await fs.open(filePath, 'r');
+      const { bytesRead } = await fh.read(buf, 0, PROBE, 0);
+      await fh.close();
+      return buf.slice(0, bytesRead).indexOf(Buffer.from('moov')) === -1;
+    } catch {
+      return false; // si no se puede leer, no intentar corregir
+    }
+  }
+
+  /**
+   * Reescribe el MP4 con moov al inicio si aún no lo tiene (stream-copy, sin re-encode).
+   *
+   * Esto evita que el concat demuxer haga seek hasta el final al abrir el archivo,
+   * eliminando el freeze/stall al transicionar a videos grandes en el playlist.
+   * Tiempo: proporcional al I/O del archivo (similar al tiempo de descarga).
+   */
+  private async ensureFaststart(filePath: string): Promise<void> {
+    if (!(await this.needsFaststart(filePath))) return; // ya tiene faststart → no hacer nada
+    const tmpPath = `${filePath}.tmp`;
+    try {
+      const ok = await new Promise<boolean>((resolve) => {
+        const proc = spawn('ffmpeg', [
+          '-y', '-loglevel', 'error',
+          '-i', filePath,
+          '-c', 'copy',
+          '-movflags', '+faststart',
+          tmpPath,
+        ], { stdio: ['ignore', 'ignore', 'pipe'] });
+        proc.on('close', (code) => resolve(code === 0));
+        proc.on('error',  ()     => resolve(false));
+      });
+      if (ok) await fs.rename(tmpPath, filePath);
+      else     await fs.unlink(tmpPath).catch(() => {});
+    } catch {
+      await fs.unlink(tmpPath).catch(() => {});
+    }
+  }
+
   private async normalizeAdSpot(inputPath: string, outputPath: string): Promise<void> {
     const runFfmpeg = (extraArgs: string[]) =>
       new Promise<boolean>((resolve) => {
