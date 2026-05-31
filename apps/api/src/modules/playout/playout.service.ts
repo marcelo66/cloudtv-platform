@@ -293,34 +293,83 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     }
     this.log(session, `Playlist: "${playlist.name}" — ${playlist.items.length} video(s)`);
 
-    // 2. Descargar MP4s — se reutiliza caché si ya existen del reinicio anterior
+    // ── 2. Calidad de emisión (se necesita ANTES de la descarga para el nombre del caché) ──────
+    const channelQualityEarly = await this.prisma.channel.findUnique({
+      where: { id: session.channelId },
+      select: { videoQuality: true },
+    });
+    const qKeyEarly    = channelQualityEarly?.videoQuality ?? '480p';
+    const qualityEarly = VIDEO_QUALITY[qKeyEarly] ?? VIDEO_QUALITY['480p'];
+
+    // ── 3. Descargar y normalizar al formato broadcast canónico ──────────────────────────────
+    //
+    // MOTOR DE CONTINUIDAD: todos los videos se convierten a formato IDÉNTICO antes de emitir.
+    //   • H.264 High Profile 4.0 · 25 fps · resolución del canal · yuv420p
+    //   • GOP fijo 50 frames (keyframe cada 2 s) · sc_threshold=0 (sin keyframes extra)
+    //   • AAC 44100 Hz estéreo
+    //   • Timestamps desde 0 (avoid_negative_ts make_zero)
+    //
+    // Con inputs idénticos el concat demuxer opera sin incompatibilidades y la salida
+    // puede ser stream-copy puro (sin re-encode) → transiciones frame-perfect.
+    //
+    // El archivo normalizado se cachea por calidad + videoId.  Si ya existe en disco
+    // (reinicio rápido, cambio de overlays, etc.) se reutiliza sin re-normalizar.
     const videosDir = path.join(session.hlsDir, 'videos');
     await fs.mkdir(videosDir, { recursive: true });
 
     const downloadedMp4s: string[] = [];
+    let totalDuration = 0;
     for (let i = 0; i < playlist.items.length; i++) {
       if (session.stopping) return;
-      const item = playlist.items[i];
-      const key = item.video.processedKey ?? item.video.originalKey;
+      const item    = playlist.items[i];
+      const key     = item.video.processedKey ?? item.video.originalKey;
       if (!key) { this.log(session, `  WARN: video ${item.video.id} sin key`); continue; }
-      const mp4Path = path.join(videosDir, `${String(i).padStart(4, '0')}.mp4`);
-      // Reutilizar si ya está en disco (reinicio rápido tras falla de overlay, etc.)
-      let alreadyCached = false;
-      try { await fs.access(mp4Path); alreadyCached = true; } catch { /* no existe */ }
-      if (alreadyCached) {
-        this.log(session, `  ✓ (en caché) ${i + 1}/${playlist.items.length}: ${path.basename(mp4Path)}`);
-        downloadedMp4s.push(mp4Path);
-      } else {
-        this.log(session, `  Descargando ${i + 1}/${playlist.items.length}: ${key}`);
+
+      const videoId  = item.video.id;
+      const dur      = item.video.duration?.toFixed(1) ?? '?';
+      // raw_<id>.mp4 → archivo original descargado (borrado al detener el canal)
+      // norm_<calidad>_<id>.mp4 → versión broadcast-ready (caché por sesión y calidad)
+      const rawPath  = path.join(videosDir, `raw_${videoId}.mp4`);
+      const normPath = path.join(videosDir, `norm_${qKeyEarly}_${videoId}.mp4`);
+
+      // 1. Reutilizar caché normalizado si existe (reinicio rápido, etc.)
+      let normExists = false;
+      try { await fs.access(normPath); normExists = true; } catch { /* no existe */ }
+      if (normExists) {
+        this.log(session, `  ✓ [broadcast-ready] ${i + 1}/${playlist.items.length} · ${dur}s`);
+        downloadedMp4s.push(normPath);
+        if (item.video.duration) totalDuration += item.video.duration;
+        continue;
+      }
+
+      // 2. Descargar original si no está en caché local
+      let rawExists = false;
+      try { await fs.access(rawPath); rawExists = true; } catch { /* no existe */ }
+      if (!rawExists) {
+        this.log(session, `  ↓ Descargando ${i + 1}/${playlist.items.length}: ${key}`);
         try {
-          await this.storage.downloadToFile(key, mp4Path);
-          downloadedMp4s.push(mp4Path);
-          this.log(session, `  ✓ ${path.basename(mp4Path)} (${item.video.duration?.toFixed(1) ?? '?'}s)`);
+          await this.storage.downloadToFile(key, rawPath);
         } catch (err: any) {
           this.log(session, `  ERROR descargando ${key}: ${err.message}`);
+          continue;
         }
       }
+
+      // 3. Normalizar a formato broadcast canónico (una vez; resultado en caché)
+      this.log(session, `  ⚙ Normalizando ${i + 1}/${playlist.items.length} (${dur}s) → ${qKeyEarly}…`);
+      try {
+        await this.normalizeVideoForBroadcast(rawPath, normPath, qualityEarly);
+        downloadedMp4s.push(normPath);
+        if (item.video.duration) totalDuration += item.video.duration;
+        this.log(session, `  ✓ [broadcast-ready] ${i + 1}/${playlist.items.length} · ${dur}s`);
+      } catch (err: any) {
+        // Fallback: usar raw si la normalización falla (no bloquear emisión)
+        this.log(session, `  WARN: normalización falló (${err.message}) → usando original sin normalizar`);
+        downloadedMp4s.push(rawPath);
+        if (item.video.duration) totalDuration += item.video.duration;
+      }
     }
+    this.log(session, `Preparación completa: ${downloadedMp4s.length} video(s) · ${(totalDuration / 60).toFixed(1)} min total · calidad ${qKeyEarly}`);
 
     if (downloadedMp4s.length === 0) {
       this.log(session, 'ERROR: No se pudo descargar ningún video.');
@@ -509,14 +558,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       `concat.txt: ${downloadedMp4s.length} video(s)${totalAdsInjected > 0 ? ` + ${totalAdsInjected} spot(s) publicitario(s)` : ' (sin publicidad)'}`,
     );
 
-    // 4. Calidad de emisión: leer del canal y resolver preset
-    const channelData = await this.prisma.channel.findUnique({
-      where: { id: session.channelId },
-      select: { videoQuality: true },
-    });
-    const qKey = channelData?.videoQuality ?? '480p';
-    const quality = VIDEO_QUALITY[qKey] ?? VIDEO_QUALITY['480p'];
-    const scale = quality.scale;
+    // 4. Calidad de emisión (ya leída en el paso 2 para la normalización)
+    const qKey    = qKeyEarly;
+    const quality = qualityEarly;
+    const scale   = quality.scale;
     this.log(session, `Calidad: ${qKey} → ${scale} @ ${quality.vBitrate} video / ${quality.aBitrate} audio`);
 
     // 5. Overlays
@@ -572,14 +617,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       '-c:a', 'aac', '-b:a', quality.aBitrate, '-ar', '44100', '-ac', '2',
     ];
 
-    // Filtro de normalización para cuando no hay overlays (scale + fps + formato)
-    // setpts=PTS-STARTPTS: normaliza timestamps al cruzar archivos en el concat demuxer
-    // eliminando saltos/freezes entre videos en la transición.
-    const normalizeVf = `scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,setpts=PTS-STARTPTS,fps=25,format=yuv420p`;
-
-    // Filtro de audio: convierte cualquier layout (mono, 5.1, 7.1, etc.) a estéreo
-    // y resamplea async para compensar gaps causados por paquetes corruptos descartados.
-    // Esto soluciona "channel element 1.6 is not allocated" en videos con audio 5.1.
+    // Filtro de audio para el camino CON overlays (filter_complex).
+    // Los archivos ya están normalizados (AAC 44100 estéreo) pero aresample async
+    // compensa cualquier micro-drift de pts en la cadena de decode+filter+encode.
     const audioFilter = 'aformat=channel_layouts=stereo,aresample=async=1000';
 
     // Para el camino con overlays: el audio se incluye dentro del mismo filter_complex
@@ -598,10 +638,19 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       '-err_detect', 'ignore_err',
     ];
 
-    // -re: leer a velocidad real (1×) → imprescindible para live HLS
-    // Sin -re FFmpeg encodes 50× más rápido, los segmentos se generan en segundos,
-    // el playlist borra los viejos antes de que el player pueda cargarlos → 404 fatal.
-    // -stream_loop -1: bucle infinito del playlist para broadcast 24/7
+    // -re: leer a velocidad real (1×) → imprescindible para live HLS.
+    // Sin -re FFmpeg encodes 50× más rápido y los segmentos se generan en segundos:
+    // el playlist borra los viejos antes de que el player pueda cargarlos → 404.
+    // -stream_loop -1: bucle infinito del playlist para broadcast 24/7.
+    //
+    // RUTAS:
+    //   A) Con overlays  → decode + filter_complex + re-encode
+    //      Los archivos ya están normalizados (formato idéntico) → decode limpio
+    //   B) Sin overlays  → stream-copy (-c copy)
+    //      Los archivos broadcast-normalizados se pasan DIRECTAMENTE al muxer HLS.
+    //      No hay decode/encode: transiciones frame-perfect y CPU mínimo.
+    //      Req: todos los inputs deben ser H.264/AAC con GOP=50 fijo (garantizado
+    //      por normalizeVideoForBroadcast).
     const args: string[] = overlayFilter
       ? [
           '-loglevel', 'warning',
@@ -617,18 +666,20 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           ...hlsArgs,
         ]
       : [
+          // Stream-copy: bitstream H.264+AAC pasa directo al muxer HLS sin decode/encode.
+          // Los segmentos se abren en el primer keyframe tras hls_time segundos
+          // (GOP=50 ≈ 2 s garantiza segmentos de ~2 s bien alineados).
           '-loglevel', 'warning',
           '-re',
           '-stream_loop', '-1',
-          ...inputFlags,
           '-f', 'concat', '-safe', '0', '-i', concatPath,
-          '-vf', normalizeVf,
-          '-af', audioFilter,
-          ...codecArgs,
+          '-c', 'copy',
           ...hlsArgs,
         ];
 
-    this.log(session, `Lanzando FFmpeg HLS${overlayFilter ? ' + overlays' : ''}...`);
+    this.log(session, overlayFilter
+      ? `Lanzando FFmpeg HLS + overlays (decode → filter → encode)…`
+      : `Lanzando FFmpeg HLS stream-copy (broadcast-ready, sin re-encode)…`);
     if (finalFilterComplex) {
       // Log diagnóstico: mostrar el filter_complex completo (video + audio) para detectar errores de sintaxis
       const fc = finalFilterComplex;
@@ -1343,6 +1394,72 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         },
       },
     });
+  }
+
+  /**
+   * Normaliza un video al formato broadcast canónico.
+   *
+   * Produce archivos con propiedades IDÉNTICAS entre sí para que el concat demuxer
+   * opere sin incompatibilidades y el muxer HLS pueda hacer stream-copy puro:
+   *
+   *   Video : H.264 High Profile 4.0 · resolución del canal · 25 fps · yuv420p
+   *           GOP fijo 50 frames (keyframe cada 2 s) · sc_threshold=0
+   *   Audio : AAC 44100 Hz estéreo · bitrate del preset de calidad
+   *   Tiempo: timestamps desde 0 (avoid_negative_ts make_zero)
+   *
+   * Usa preset 'fast' (mejor calidad que ultrafast, aceptable para pre-procesado
+   * offline) y CRF 22 (ligeramente superior al encode en vivo CRF 26).
+   *
+   * Se llama UNA vez por video por sesión; el resultado se cachea en disco.
+   */
+  private async normalizeVideoForBroadcast(
+    inputPath: string,
+    outputPath: string,
+    quality: { scale: string; vBitrate: string; maxrate: string; bufsize: string; aBitrate: string },
+  ): Promise<void> {
+    const ok = await new Promise<boolean>((resolve) => {
+      const proc = spawn(
+        'ffmpeg',
+        [
+          '-y', '-loglevel', 'error',
+          '-i', inputPath,
+          // ─── Video ─────────────────────────────────────────────────────────
+          '-vf', [
+            `scale=${quality.scale}:force_original_aspect_ratio=decrease`,
+            `pad=${quality.scale}:(ow-iw)/2:(oh-ih)/2:black`,
+            'fps=25',
+            'format=yuv420p',
+          ].join(','),
+          '-c:v',         'libx264',
+          '-preset',      'fast',     // Offline → mejor calidad que ultrafast
+          '-crf',         '22',       // Ligeramente superior al vivo (CRF 26)
+          '-b:v',         quality.vBitrate,
+          '-maxrate',     quality.maxrate,
+          '-bufsize',     quality.bufsize,
+          '-g',           '50',       // Keyframe cada 50 frames = 2 s a 25 fps
+          '-keyint_min',  '50',       // IDR obligatorio cada 50 frames
+          '-sc_threshold','0',        // Sin keyframes extra por scene-cut
+          '-profile:v',   'high',     // H.264 High Profile (compatible HLS)
+          '-level:v',     '4.0',
+          // ─── Audio ─────────────────────────────────────────────────────────
+          '-c:a',  'aac',
+          '-ar',   '44100',
+          '-ac',   '2',
+          '-b:a',  quality.aBitrate,
+          // ─── Timestamps ────────────────────────────────────────────────────
+          '-avoid_negative_ts', 'make_zero',
+          '-movflags', '+faststart',
+          outputPath,
+        ],
+        { stdio: ['ignore', 'ignore', 'pipe'] },
+      );
+      proc.on('close', (code) => resolve(code === 0));
+      proc.on('error', () => resolve(false));
+    });
+
+    if (!ok) {
+      throw new Error(`normalizeVideoForBroadcast falló: ${path.basename(inputPath)}`);
+    }
   }
 
   /**
