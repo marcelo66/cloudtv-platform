@@ -73,7 +73,8 @@ export function CreateScheduleModal({ channelId, initialStart, schedule, onClose
   const [playlistId,   setPlaylistId]   = useState(schedule?.playlistId ?? '');
   const [startTime,    setStartTime]    = useState(defaultStart);
   const [endTime,      setEndTime]      = useState(defaultEnd);
-  const [recurrence,   setRecurrence]   = useState(schedule?.recurrence ?? 'ONCE');
+  type Recurrence = 'ONCE' | 'DAILY' | 'WEEKLY' | 'WEEKDAYS' | 'WEEKENDS';
+  const [recurrence,   setRecurrence]   = useState<Recurrence>((schedule?.recurrence as Recurrence) ?? 'ONCE');
   const [priority,     setPriority]     = useState(schedule?.priority ?? 0);
   const [preAdBlockId, setPreAdBlockId] = useState(schedule?.preAdBlockId ?? '');
   const [postAdBlockId,setPostAdBlockId]= useState(schedule?.postAdBlockId ?? '');
