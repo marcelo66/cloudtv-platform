@@ -132,3 +132,21 @@ export function useRemovePlaylistItem() {
     onError: () => toast.error('Error al quitar video'),
   });
 }
+
+export function useReorderPlaylistItems() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      playlistId,
+      items,
+    }: {
+      playlistId: string;
+      items: Array<{ id: string; order: number }>;
+    }) => apiClient.patch(`/playlists/${playlistId}/items/reorder`, { items }),
+    onSuccess: (_, vars) => {
+      qc.invalidateQueries({ queryKey: ['playlist', vars.playlistId] });
+      qc.invalidateQueries({ queryKey: ['playlists'] });
+    },
+    onError: () => toast.error('Error al reordenar'),
+  });
+}
