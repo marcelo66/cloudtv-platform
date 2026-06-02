@@ -39,7 +39,13 @@ const SRT_LISTENER_STATUS = {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function PlatformBadge({ platform, size = 'md' }: { platform: Platform; size?: 'sm' | 'md' }) {
+function PlatformBadge({
+  platform, size = 'md', badgeOverride,
+}: {
+  platform: Platform;
+  size?: 'sm' | 'md';
+  badgeOverride?: string;
+}) {
   const m = PLATFORM_META[platform];
   return (
     <span className={cn(
@@ -47,9 +53,16 @@ function PlatformBadge({ platform, size = 'md' }: { platform: Platform; size?: '
       m.bg, m.color, m.border, 'border',
       size === 'sm' ? 'px-1.5 h-6 text-[10px]' : 'px-2 h-7 text-xs',
     )}>
-      {m.badge}
+      {badgeOverride ?? m.badge}
     </span>
   );
+}
+
+/** Para RTMP_CUSTOM: deriva badge corto del nombre ("RTMP 1" → "RT1", "Mi servidor" → "RT") */
+function getRtmpCustomBadge(name: string): string {
+  const match = name.match(/(\d+)$/);
+  if (match) return `RT${match[1]}`;
+  return 'RTMP';
 }
 
 function MaskedKey({ value }: { value: string }) {
@@ -118,7 +131,10 @@ function OutputCard({
   return (
     <div className={cn('glass-card p-4 transition-opacity', !output.enabled && 'opacity-60')}>
       <div className="flex items-start gap-3">
-        <PlatformBadge platform={output.platform} />
+        <PlatformBadge
+          platform={output.platform}
+          badgeOverride={output.platform === 'RTMP_CUSTOM' ? getRtmpCustomBadge(output.name) : undefined}
+        />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-semibold text-white truncate">{output.name}</span>
@@ -398,11 +414,12 @@ function ZeroTierPanel({ onPickIp }: { onPickIp?: (ip: string) => void }) {
 // ─── Form Modal ──────────────────────────────────────────────────────────────
 
 function OutputFormModal({
-  channelId, output, onClose,
+  channelId, output, existingOutputs, onClose,
 }: {
-  channelId: string;
-  output:    StreamOutput | null;
-  onClose:   () => void;
+  channelId:       string;
+  output:          StreamOutput | null;
+  existingOutputs: StreamOutput[];
+  onClose:         () => void;
 }) {
   const isEdit = !!output;
 
@@ -434,8 +451,20 @@ function OutputFormModal({
     setPlatform(p);
     const def = PLATFORM_META[p].defaultRtmpUrl;
     if (def) setRtmpUrl(def);
-    if (!name || ALL_PLATFORMS.some(pl => PLATFORM_META[pl].label === name)) {
-      setName(PLATFORM_META[p].label);
+
+    // Auto-nombre: solo sobreescribir si el nombre está vacío o es el default de otra plataforma
+    const isAutoName = !name
+      || ALL_PLATFORMS.some(pl => PLATFORM_META[pl].label === name)
+      || /^RTMP \d+$/.test(name);
+
+    if (isAutoName) {
+      if (p === 'RTMP_CUSTOM') {
+        // Numerar: "RTMP 1", "RTMP 2", etc. según cuántos RTMP Custom ya existen
+        const existing = existingOutputs.filter(o => o.platform === 'RTMP_CUSTOM').length;
+        setName(`RTMP ${existing + 1}`);
+      } else {
+        setName(PLATFORM_META[p].label);
+      }
     }
   };
 
@@ -513,7 +542,14 @@ function OutputFormModal({
         {/* Header */}
         <div className="flex items-center justify-between p-5 border-b border-surface-700">
           <div className="flex items-center gap-2.5">
-            <PlatformBadge platform={effectivePlatform} />
+            <PlatformBadge
+              platform={effectivePlatform}
+              badgeOverride={
+                effectivePlatform === 'RTMP_CUSTOM' && name
+                  ? getRtmpCustomBadge(name)
+                  : undefined
+              }
+            />
             <h2 className="text-base font-semibold text-white">
               {isEdit ? `Editar — ${meta.label}` : 'Nueva salida de stream'}
             </h2>
@@ -1037,6 +1073,7 @@ export default function StreamPage() {
         <OutputFormModal
           channelId={channelId}
           output={editing}
+          existingOutputs={outputs}
           onClose={() => setShowModal(false)}
         />
       )}
