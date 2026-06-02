@@ -48,11 +48,23 @@ const LOOP_LABELS: Record<string, string> = {
 
 // ─── Item Sortable ───────────────────────────────────────────────────────────
 
+/** Formatea segundos totales a HH:MM:SS o MM:SS */
+function formatOffset(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  const mm = String(m).padStart(2, '0');
+  const ss = String(s).padStart(2, '0');
+  if (h > 0) return `${h}:${mm}:${ss}`;
+  return `${mm}:${ss}`;
+}
+
 interface SortableItemProps {
   item: PlaylistItem;
   idx: number;
   total: number;
   playlistId: string;
+  startOffset: number;   // segundos acumulados antes de este item
   onMoveUp: () => void;
   onMoveDown: () => void;
   onRemove: () => void;
@@ -63,6 +75,7 @@ function SortableItem({
   item,
   idx,
   total,
+  startOffset,
   onMoveUp,
   onMoveDown,
   onRemove,
@@ -121,9 +134,15 @@ function SortableItem({
       {/* Info */}
       <div className="flex-1 min-w-0">
         <p className="text-sm text-white truncate">{item.video.title}</p>
-        {item.video.duration && (
-          <p className="text-xs text-slate-500">{formatDuration(item.video.duration)}</p>
-        )}
+        <div className="flex items-center gap-2 mt-0.5">
+          {item.video.duration && (
+            <span className="text-xs text-slate-500">{formatDuration(item.video.duration)}</span>
+          )}
+          {/* Posición acumulada en la playlist */}
+          <span className="text-[11px] text-slate-600 font-mono" title="Posición de inicio en la playlist">
+            @ {formatOffset(startOffset)}
+          </span>
+        </div>
       </div>
 
       {/* Flechas ↑↓ */}
@@ -441,19 +460,29 @@ export function PlaylistDetail({ playlistId, channelId, onBack }: Props) {
               strategy={verticalListSortingStrategy}
             >
               <div className="glass-card divide-y divide-white/5 overflow-hidden">
-                {localItems.map((item, idx) => (
-                  <SortableItem
-                    key={item.id}
-                    item={item}
-                    idx={idx}
-                    total={localItems.length}
-                    playlistId={playlistId}
-                    isReordering={reorderItems.isPending}
-                    onMoveUp={() => handleMoveItem(idx, idx - 1)}
-                    onMoveDown={() => handleMoveItem(idx, idx + 1)}
-                    onRemove={() => removeItem.mutate({ playlistId, itemId: item.id })}
-                  />
-                ))}
+                {localItems.map((item, idx) => {
+                  // Calcular posición acumulada (segundos antes de este item)
+                  const startOffset = localItems.slice(0, idx).reduce((acc, it) => {
+                    const dur = it.video.duration ?? 0;
+                    const from = it.trimStart ?? 0;
+                    const to   = it.trimEnd   ?? dur;
+                    return acc + Math.max(0, to - from);
+                  }, 0);
+                  return (
+                    <SortableItem
+                      key={item.id}
+                      item={item}
+                      idx={idx}
+                      total={localItems.length}
+                      playlistId={playlistId}
+                      startOffset={startOffset}
+                      isReordering={reorderItems.isPending}
+                      onMoveUp={() => handleMoveItem(idx, idx - 1)}
+                      onMoveDown={() => handleMoveItem(idx, idx + 1)}
+                      onRemove={() => removeItem.mutate({ playlistId, itemId: item.id })}
+                    />
+                  );
+                })}
               </div>
             </SortableContext>
           </DndContext>

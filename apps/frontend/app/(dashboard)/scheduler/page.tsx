@@ -10,6 +10,7 @@ import {
   List,
   CalendarDays,
   RefreshCw,
+  Pencil,
 } from 'lucide-react';
 import { Header } from '@/components/dashboard/Header';
 import { CreateScheduleModal } from '@/components/scheduler/CreateScheduleModal';
@@ -81,8 +82,9 @@ export default function SchedulerPage() {
   const [channelId, setChannelId] = useState<string | null>(null);
   const [weekStart, setWeekStart] = useState<Date>(() => getWeekStart(new Date()));
   const [view, setView] = useState<'week' | 'list'>('week');
-  const [showCreate, setShowCreate] = useState(false);
-  const [createStart, setCreateStart] = useState<string | undefined>();
+  const [showCreate,    setShowCreate]    = useState(false);
+  const [createStart,   setCreateStart]   = useState<string | undefined>();
+  const [editSchedule,  setEditSchedule]  = useState<Schedule | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   useEffect(() => {
@@ -238,11 +240,13 @@ export default function SchedulerPage() {
             schedulesByDay={schedulesByDay}
             today={today}
             onCellClick={handleCellClick}
+            onEditRequest={setEditSchedule}
             onDeleteRequest={setConfirmDelete}
           />
         ) : (
           <ListView
             schedules={schedules}
+            onEditRequest={setEditSchedule}
             onDeleteRequest={setConfirmDelete}
           />
         )}
@@ -254,6 +258,14 @@ export default function SchedulerPage() {
           channelId={channelId}
           initialStart={createStart}
           onClose={() => setShowCreate(false)}
+        />
+      )}
+
+      {editSchedule && channelId && (
+        <CreateScheduleModal
+          channelId={channelId}
+          schedule={editSchedule}
+          onClose={() => setEditSchedule(null)}
         />
       )}
 
@@ -273,17 +285,33 @@ export default function SchedulerPage() {
 const CELL_HEIGHT = 48; // px per hour
 const TOTAL_HEIGHT = CELL_HEIGHT * 24;
 
+/** Formatea duración en segundos → "2h 30m" */
+function fmtDur(seconds: number): string {
+  const m = Math.round(Math.max(0, seconds) / 60);
+  const h = Math.floor(m / 60);
+  const min = m % 60;
+  if (h === 0) return `${min}m`;
+  if (min === 0) return `${h}h`;
+  return `${h}h ${min}m`;
+}
+
+function slotDur(startIso: string, endIso: string): number {
+  return Math.max(0, (new Date(endIso).getTime() - new Date(startIso).getTime()) / 1000);
+}
+
 function WeekView({
   weekStart,
   schedulesByDay,
   today,
   onCellClick,
+  onEditRequest,
   onDeleteRequest,
 }: {
   weekStart: Date;
   schedulesByDay: Record<number, Schedule[]>;
   today: string;
   onCellClick: (dayIndex: number, hour: number) => void;
+  onEditRequest: (s: Schedule) => void;
   onDeleteRequest: (id: string) => void;
 }) {
   return (
@@ -369,10 +397,11 @@ function WeekView({
               {/* Schedule blocks */}
               {daySchedules.map((sch, idx) => {
                 const startMin = minutesFromMidnight(sch.startTime);
-                const endMin = minutesFromMidnight(sch.endTime);
-                const top = (startMin / 60) * CELL_HEIGHT;
-                const height = Math.max(((endMin - startMin) / 60) * CELL_HEIGHT, 20);
+                const endMin   = minutesFromMidnight(sch.endTime);
+                const top      = (startMin / 60) * CELL_HEIGHT;
+                const height   = Math.max(((endMin - startMin) / 60) * CELL_HEIGHT, 20);
                 const colorClass = TRACK_COLORS[idx % TRACK_COLORS.length];
+                const dur = slotDur(sch.startTime, sch.endTime);
 
                 return (
                   <div
@@ -386,22 +415,35 @@ function WeekView({
                   >
                     <div className="px-1.5 pt-1 flex items-start justify-between gap-1">
                       <div className="flex-1 min-w-0">
-                        <p className="text-xs font-semibold leading-tight truncate">
-                          {sch.name}
-                        </p>
+                        <p className="text-xs font-semibold leading-tight truncate">{sch.name}</p>
                         {height > 28 && (
-                          <p className="text-xs opacity-70 truncate leading-tight">
+                          <p className="text-[10px] opacity-70 truncate leading-tight">
                             {formatTime(sch.startTime)} – {formatTime(sch.endTime)}
                           </p>
                         )}
+                        {height > 42 && (
+                          <p className="text-[10px] opacity-60 truncate leading-tight">
+                            ⏱ {fmtDur(dur)}
+                          </p>
+                        )}
                       </div>
-                      <button
-                        onClick={() => onDeleteRequest(sch.id)}
-                        className="flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-white/10"
-                        title="Eliminar"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
+                      {/* Acciones: editar + eliminar (visibles al hover) */}
+                      <div className="flex-shrink-0 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button
+                          onClick={() => onEditRequest(sch)}
+                          className="p-0.5 rounded hover:bg-white/20 transition-colors"
+                          title="Editar"
+                        >
+                          <Pencil className="w-2.5 h-2.5" />
+                        </button>
+                        <button
+                          onClick={() => onDeleteRequest(sch.id)}
+                          className="p-0.5 rounded hover:bg-white/20 transition-colors"
+                          title="Eliminar"
+                        >
+                          <Trash2 className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
                     </div>
                   </div>
                 );
@@ -418,9 +460,11 @@ function WeekView({
 
 function ListView({
   schedules,
+  onEditRequest,
   onDeleteRequest,
 }: {
   schedules: Schedule[];
+  onEditRequest: (s: Schedule) => void;
   onDeleteRequest: (id: string) => void;
 }) {
   if (schedules.length === 0) {
@@ -443,6 +487,7 @@ function ListView({
     <div className="flex-1 overflow-y-auto space-y-2">
       {schedules.map((sch) => {
         const badge = RECURRENCE_BADGE[sch.recurrence] ?? RECURRENCE_BADGE.ONCE;
+        const dur   = slotDur(sch.startTime, sch.endTime);
         return (
           <div
             key={sch.id}
@@ -458,15 +503,15 @@ function ListView({
               </p>
               <p className="text-xs text-slate-600 mt-0.5">
                 {new Date(sch.startTime).toLocaleDateString('es-AR', {
-                  weekday: 'short',
-                  day: 'numeric',
-                  month: 'short',
+                  weekday: 'short', day: 'numeric', month: 'short',
                 })}
               </p>
+              {/* Duración del bloque */}
+              <p className="text-[11px] text-brand-400 font-medium mt-0.5">⏱ {fmtDur(dur)}</p>
             </div>
 
             {/* Divider */}
-            <div className="w-px h-10 bg-white/10 flex-shrink-0" />
+            <div className="w-px h-12 bg-white/10 flex-shrink-0" />
 
             {/* Info */}
             <div className="flex-1 min-w-0">
@@ -477,29 +522,32 @@ function ListView({
             </div>
 
             {/* Badge */}
-            <span
-              className={cn(
-                'flex-shrink-0 text-xs px-2 py-0.5 rounded-full font-medium',
-                badge.color,
-              )}
-            >
+            <span className={cn('flex-shrink-0 text-xs px-2 py-0.5 rounded-full font-medium', badge.color)}>
               {badge.label}
             </span>
 
             {/* Priority */}
             {sch.priority > 0 && (
-              <span className="flex-shrink-0 text-xs text-slate-600 font-mono">
-                P{sch.priority}
-              </span>
+              <span className="flex-shrink-0 text-xs text-slate-600 font-mono">P{sch.priority}</span>
             )}
 
-            {/* Delete */}
-            <button
-              onClick={() => onDeleteRequest(sch.id)}
-              className="flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10"
-            >
-              <Trash2 className="w-4 h-4" />
-            </button>
+            {/* Acciones */}
+            <div className="flex-shrink-0 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+              <button
+                onClick={() => onEditRequest(sch)}
+                className="p-1.5 rounded-lg text-slate-500 hover:text-white hover:bg-white/10 transition-colors"
+                title="Editar"
+              >
+                <Pencil className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={() => onDeleteRequest(sch.id)}
+                className="p-1.5 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                title="Eliminar"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         );
       })}
