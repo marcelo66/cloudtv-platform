@@ -1,13 +1,14 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
+import { createReadStream } from 'fs';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { PrismaService } from '../../prisma/prisma.service';
 import { StorageService } from '../../storage/storage.service';
 import { FfprobeService } from '../services/ffprobe.service';
-import { FfmpegService } from '../services/ffmpeg.service';
+import { FfmpegService, BroadcastQuality } from '../services/ffmpeg.service';
 import {
   VIDEO_QUEUE,
   VideoProcessingJobData,
@@ -91,38 +92,52 @@ export class VideoProcessor extends WorkerHost {
       await job.updateProgress(65);
       this.logger.log(`Thumbnail uploaded: ${thumbnailKey}`);
 
-      // ─── 6. Transcodificar si es necesario ───────────────────
-      let finalKey = originalKey;
+      // ─── 6. Normalizar a formato broadcast canónico (Opción B) ──────────────
+      //
+      // Genera 3 versiones pre-normalizadas (480p, 720p, 1080p) desde el original.
+      // Cada una queda en S3 con key norm_Xp.mp4 lista para stream-copy en playout.
+      //
+      // Esto elimina toda normalización en tiempo de emisión:
+      //   · Sin bg-norm al arrancar el canal
+      //   · Sin stalls en transiciones entre videos
+      //   · Sin reinicios bootstrap (primera ejecución = calidad final)
+      //
+      // Usamos stream de lectura para el upload (evita cargar GBs en memoria).
 
-      if (this.ffmpeg.needsTranscode(metadata.codec, metadata.audioCodec, metadata.audioChannels)) {
-        this.logger.log(
-          `Transcoding required: codec=${metadata.codec} audio=${metadata.audioCodec} channels=${metadata.audioChannels}`,
-        );
-        const outputPath = path.join(tmpDir, 'processed.mp4');
-        await this.ffmpeg.transcodeToH264(inputPath, outputPath);
+      const qualities: BroadcastQuality[] = ['480p', '720p', '1080p'];
+      const normKeyMap: Record<string, string> = {};
 
-        const processedKey = this.storage.buildProcessedKey(channelId, videoId);
-        const processedBuffer = await fs.readFile(outputPath);
-        await this.storage.putObject(processedKey, processedBuffer, 'video/mp4');
+      for (let qi = 0; qi < qualities.length; qi++) {
+        const q = qualities[qi];
+        const normPath = path.join(tmpDir, `norm_${q}.mp4`);
 
-        finalKey = processedKey;
-        await this.prisma.video.update({
-          where: { id: videoId },
-          data: { processedKey },
-        });
+        this.logger.log(`Normalizing to ${q} (${qi + 1}/3)…`);
+        await this.ffmpeg.normalizeToBroadcast(inputPath, normPath, q);
 
-        await job.updateProgress(90);
-        this.logger.log(`Transcoded video uploaded: ${processedKey}`);
-      } else {
-        this.logger.log(
-          `No transcode needed (${metadata.codec}/${metadata.audioCodec} ${metadata.audioChannels}ch) — using original`,
-        );
-        await this.prisma.video.update({
-          where: { id: videoId },
-          data: { processedKey: originalKey },
-        });
-        await job.updateProgress(90);
+        const normKey = this.storage.buildNormKey(channelId, videoId, q);
+        await this.storage.putObject(normKey, createReadStream(normPath), 'video/mp4');
+        normKeyMap[q] = normKey;
+
+        // Liberar espacio en disco inmediatamente (el original sigue en inputPath)
+        await fs.rm(normPath).catch(() => {});
+
+        // Progreso: 65% → 70% → 80% → 90%
+        await job.updateProgress(65 + (qi + 1) * 8);
+        this.logger.log(`✓ norm_${q} subido a S3: ${normKey}`);
       }
+
+      // Guardar las 3 keys + processedKey = 720p (backward compat con ad spots y playout viejo)
+      await this.prisma.video.update({
+        where: { id: videoId },
+        data: {
+          norm480pKey:  normKeyMap['480p'],
+          norm720pKey:  normKeyMap['720p'],
+          norm1080pKey: normKeyMap['1080p'],
+          processedKey: normKeyMap['720p'], // Backward compat
+        },
+      });
+
+      await job.updateProgress(95);
 
       // ─── 7. Marcar como READY ─────────────────────────────────
       await this.prisma.video.update({

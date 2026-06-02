@@ -105,6 +105,11 @@ model Video {
   status        VideoStatus @default(PENDING)
   originalKey   String      @map("original_key")
   processedKey  String?     @map("processed_key")
+  // ─── Pre-normalized broadcast-canonical versions (Option B) ──────────────
+  // Generated at upload time; playout uses these directly (stream-copy, no re-encode).
+  norm480pKey   String?     @map("norm_480p_key")
+  norm720pKey   String?     @map("norm_720p_key")
+  norm1080pKey  String?     @map("norm_1080p_key")
   thumbnailUrl  String?     @map("thumbnail_url")
   duration      Float?
   width         Int?

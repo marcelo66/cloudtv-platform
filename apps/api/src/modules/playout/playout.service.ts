@@ -330,34 +330,59 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     for (let i = 0; i < playlist.items.length; i++) {
       if (session.stopping) return;
       const item    = playlist.items[i];
-      const key     = item.video.processedKey ?? item.video.originalKey;
-      if (!key) { this.log(session, `  WARN: video ${item.video.id} sin key`); continue; }
-
       const videoId  = item.video.id;
       const dur      = item.video.duration?.toFixed(1) ?? '?';
       const rawPath  = path.join(videosDir, `raw_${videoId}.mp4`);
       const normPath = path.join(videosDir, `norm_${qKeyEarly}_${videoId}.mp4`);
 
-      // 1. Caché normalizado disponible → reutilizar (reinicio rápido, stream-copy)
+      // ── Opción B: key pre-normalizada en S3 para la calidad del canal ──────────────────
+      // Videos procesados con el pipeline nuevo tienen norm_Xp en S3; se descargan
+      // directamente al normPath → cero normalización en tiempo de emisión.
+      const normKeyDb: string | null | undefined =
+        qKeyEarly === '480p'  ? item.video.norm480pKey  :
+        qKeyEarly === '720p'  ? item.video.norm720pKey  :
+        qKeyEarly === '1080p' ? item.video.norm1080pKey :
+        null;
+
+      // 1. Caché local norm disponible → reutilizar (reinicio rápido, stream-copy)
       let normExists = false;
       try { await fs.access(normPath); normExists = true; } catch { /* no existe */ }
       if (normExists) {
-        this.log(session, `  ✓ [norm] ${i + 1}/${playlist.items.length} · ${dur}s`);
+        this.log(session, `  ✓ [norm-cache] ${i + 1}/${playlist.items.length} · ${dur}s`);
         downloadedMp4s.push(normPath);
         downloadedMap.set(i, normPath);
         if (item.video.duration) totalDuration += item.video.duration;
         continue;
       }
 
-      // 2. Descargar raw si no está en disco
+      // 2. Pre-normalizado en S3 (Opción B) → descargar directo al normPath, sin bg-norm
+      if (normKeyDb) {
+        this.log(session, `  ↓ [prenorm-${qKeyEarly}] ${i + 1}/${playlist.items.length}: descargando…`);
+        try {
+          await this.storage.downloadToFile(normKeyDb, normPath);
+          this.log(session, `  ✓ [prenorm] ${i + 1}/${playlist.items.length} · ${dur}s`);
+          downloadedMp4s.push(normPath);
+          downloadedMap.set(i, normPath);
+          if (item.video.duration) totalDuration += item.video.duration;
+          continue; // ← no va a pendingNorm: ya está normalizado
+        } catch (err: any) {
+          this.log(session, `  WARN: fallo descargando prenorm, usando raw: ${err.message}`);
+          // fallthrough → descarga raw como respaldo
+        }
+      }
+
+      // 3. Fallback: descargar raw + normalizar en background (videos sin prenorm en S3)
+      const rawKey = item.video.processedKey ?? item.video.originalKey;
+      if (!rawKey) { this.log(session, `  WARN: video ${videoId} sin key`); continue; }
+
       let rawExists = false;
       try { await fs.access(rawPath); rawExists = true; } catch { /* no existe */ }
       if (!rawExists) {
-        this.log(session, `  ↓ Descargando ${i + 1}/${playlist.items.length}: ${key}`);
+        this.log(session, `  ↓ [raw] ${i + 1}/${playlist.items.length}: ${rawKey}`);
         try {
-          await this.storage.downloadToFile(key, rawPath);
+          await this.storage.downloadToFile(rawKey, rawPath);
         } catch (err: any) {
-          this.log(session, `  ERROR descargando ${key}: ${err.message}`);
+          this.log(session, `  ERROR descargando ${rawKey}: ${err.message}`);
           continue;
         }
         // Asegurar faststart: si el moov no está al inicio, reescribir (stream-copy, rápido).
@@ -366,8 +391,8 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         await this.ensureFaststart(rawPath).catch(() => {});
       }
 
-      // 3. Raw disponible → usar ahora; normalizar en background para próxima ejecución
-      this.log(session, `  ✓ [raw] ${i + 1}/${playlist.items.length} · ${dur}s`);
+      // Raw disponible → usar ahora; normalizar en background para próxima ejecución
+      this.log(session, `  ✓ [raw] ${i + 1}/${playlist.items.length} · ${dur}s (bg-norm pendiente)`);
       downloadedMp4s.push(rawPath);
       downloadedMap.set(i, rawPath);
       pendingNorm.push({ rawPath, normPath });
@@ -440,7 +465,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           include: {
             spots: {
               where: { isActive: true },
-              include: { video: { select: { id: true, originalKey: true, processedKey: true, duration: true, status: true } } },
+              include: { video: { select: { id: true, originalKey: true, processedKey: true, norm480pKey: true, norm720pKey: true, norm1080pKey: true, duration: true, status: true } } },
               orderBy: { order: 'asc' },
             },
           },
@@ -1480,7 +1505,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     const now = new Date();
     const spotSelect = {
       where:   { isActive: true },
-      include: { video: { select: { id: true, originalKey: true, processedKey: true, duration: true, status: true } } },
+      include: { video: { select: { id: true, originalKey: true, processedKey: true, norm480pKey: true, norm720pKey: true, norm1080pKey: true, duration: true, status: true } } },
       orderBy: { order: 'asc' as const },
     };
     return this.prisma.schedule.findFirst({
@@ -2170,7 +2195,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       orderBy: { order: 'asc' as const },
       include: {
         video: {
-          select: { id: true, originalKey: true, processedKey: true, duration: true, status: true },
+          select: { id: true, originalKey: true, processedKey: true, norm480pKey: true, norm720pKey: true, norm1080pKey: true, duration: true, status: true },
         },
       },
     } as const;

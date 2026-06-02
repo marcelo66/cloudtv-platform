@@ -272,4 +272,12 @@ export class StorageService implements OnModuleInit {
   buildProcessedKey(channelId: string, videoId: string): string {
     return `videos/${channelId}/${videoId}/processed.mp4`;
   }
+
+  /**
+   * Key para la versión pre-normalizada al formato broadcast canónico.
+   * Generada en el pipeline de upload (Option B) y usada directamente por playout.
+   */
+  buildNormKey(channelId: string, videoId: string, quality: '480p' | '720p' | '1080p'): string {
+    return `videos/${channelId}/${videoId}/norm_${quality}.mp4`;
+  }
 }
