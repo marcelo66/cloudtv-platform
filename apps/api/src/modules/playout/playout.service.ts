@@ -399,33 +399,61 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       if (item.video.duration) totalDuration += item.video.duration;
     }
 
-    // ── Normalización broadcast en background ─────────────────────────────────────
+    // ── Normalización broadcast SÍNCRONA ──────────────────────────────────────────
     //
-    // ARRANQUE INMEDIATO: el stream inicia ahora mismo con los archivos disponibles
-    // (raw o norm). La normalización ocurre en background SECUENCIALMENTE para no
-    // saturar la CPU del servidor (paralelo es peor en containers con CPU limitada:
-    // N procesos × 1/N CPU = misma velocidad por video, pero el total nunca mejora
-    // y bloquea el arranque si algún video es largo).
+    // Se espera a que todos los archivos estén en formato broadcast canónico ANTES
+    // de lanzar FFmpeg. Garantiza stream-copy puro desde el primer frame: sin
+    // tirones, sin freezes en transiciones, sin reinicios mid-stream.
     //
-    // Primera ejecución: raw → re-encode en tiempo real (puede haber breves freezes
-    //   en transiciones si los archivos tienen distintos fps/resolución).
-    // Ejecuciones posteriores: norm cache → stream-copy, transiciones frame-perfect.
+    // Para videos procesados con Opción B (prenorm en S3): este bloque no se ejecuta
+    // porque pendingNorm siempre estará vacío (ya se descargaron los norm_Xp.mp4).
+    // Para videos anteriores (sin prenorm): se normalizan una sola vez; en
+    // reinicios posteriores se encuentran en caché local → arranque inmediato.
     const allNormalized = pendingNorm.length === 0;
 
     if (allNormalized) {
-      this.log(session, `✓ Todo en caché broadcast-ready → stream-copy disponible`);
+      this.log(session, `✓ Todo broadcast-ready → stream-copy disponible`);
+    } else if (session.bgNormRunning) {
+      // Una normalización de un reinicio anterior sigue en progreso — esperar a que termine
+      this.log(session, `⏳ Esperando normalización en curso (${pendingNorm.length} pendiente(s))…`);
+      while (session.bgNormRunning && !session.stopping) {
+        await new Promise<void>(r => setTimeout(r, 500));
+      }
+      if (session.stopping) return;
+      this.log(session, `✓ Normalización previa completada`);
     } else {
-      this.log(session, `⚙ ${pendingNorm.length} video(s) se normalizarán en background (arranque inmediato)`);
-      if (!session.bgNormRunning) {
-        // Ordenar de más corto a más largo: los videos breves quedan listos primero
-        pendingNorm.sort((a, b) => {
-          const durA = playlist.items.find(it => a.rawPath.includes(it.video.id))?.video.duration ?? 0;
-          const durB = playlist.items.find(it => b.rawPath.includes(it.video.id))?.video.duration ?? 0;
-          return durA - durB;
-        });
-        this.runBackgroundNormalization(session, pendingNorm, qualityEarly);
-      } else {
-        this.log(session, `  (normalización ya en progreso — omitiendo nueva instancia para evitar conflicto)`);
+      // Ordenar de más corto a más largo: los clips breves terminan primero
+      pendingNorm.sort((a, b) => {
+        const durA = playlist.items.find(it => a.rawPath.includes(it.video.id))?.video.duration ?? 0;
+        const durB = playlist.items.find(it => b.rawPath.includes(it.video.id))?.video.duration ?? 0;
+        return durA - durB;
+      });
+      this.log(session, `⚙ Normalizando ${pendingNorm.length} video(s) a formato broadcast…`);
+      session.bgNormRunning = true;
+      let normDone = 0;
+      for (const { rawPath, normPath } of pendingNorm) {
+        if (session.stopping) { session.bgNormRunning = false; return; }
+        try {
+          await this.normalizeVideoForBroadcast(rawPath, normPath, qualityEarly);
+          normDone++;
+          this.log(session, `  ✓ [norm] ${normDone}/${pendingNorm.length} → ${path.basename(normPath)}`);
+        } catch (err: any) {
+          this.log(session, `  ✗ [norm] falló ${path.basename(rawPath)}: ${err.message}`);
+        }
+      }
+      session.bgNormRunning = false;
+      if (session.stopping) return;
+      this.log(session, `✓ Normalización completa (${normDone}/${pendingNorm.length}) → arranque broadcast-ready`);
+    }
+
+    // Actualizar downloadedMap: reemplazar raw paths por norm paths donde ya estén listos
+    for (const [idx, filePath] of downloadedMap) {
+      const normEntry = pendingNorm.find(n => n.rawPath === filePath);
+      if (normEntry) {
+        try {
+          await fs.access(normEntry.normPath);   // confirmar que el archivo norm existe
+          downloadedMap.set(idx, normEntry.normPath);
+        } catch { /* norm falló; raw se mantiene como fallback */ }
       }
     }
 
