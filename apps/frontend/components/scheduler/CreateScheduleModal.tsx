@@ -261,7 +261,7 @@ export function CreateScheduleModal({ channelId, initialStart, schedule, onClose
             <label className="block text-xs font-medium text-slate-400 mb-1.5">Repetición</label>
             <select
               value={recurrence}
-              onChange={(e) => setRecurrence(e.target.value)}
+              onChange={(e) => setRecurrence(e.target.value as Recurrence)}
               className={inputClass}
             >
               {RECURRENCE_OPTIONS.map((opt) => (
