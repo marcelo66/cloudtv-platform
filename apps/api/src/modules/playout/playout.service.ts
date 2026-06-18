@@ -309,94 +309,98 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
     // ── 3. Descargar y preparar archivos para emisión ────────────────────────────────────────
     //
-    // HOT START: el stream arranca en cuanto los archivos están disponibles (descargados).
-    // La normalización al formato broadcast canónico se ejecuta en BACKGROUND, sin bloquear.
+    // CACHÉ PERSISTENTE: los archivos normalizados se guardan en /tmp/cloudtv-norm/{channelId}/
+    // fuera del hlsDir (que se borra al parar el canal). Así los reinicios son instantáneos:
+    // los archivos ya descargados se reutilizan sin volver a descargar desde S3.
     //
-    // Primera ejecución  → archivos raw descargados → re-encode en tiempo real (inicia de inmediato)
-    // Ejecuciones posteriores → norm_{quality}_{id}.mp4 en caché → stream-copy sin decode/encode
-    //
-    // El archivo normalizado (norm_<quality>_<id>.mp4) se cachea por calidad + videoId.
-    // Una vez generado en background, el próximo reinicio lo detecta y usa stream-copy.
+    // DESCARGA PARALELA: todos los videos se descargan en paralelo (máximo DOWNLOAD_CONCURRENCY
+    // simultáneos) en lugar de uno tras otro. Para playlists de N videos: tiempo ≈ max(t_i)
+    // en lugar de Σ(t_i).
+
+    const DOWNLOAD_CONCURRENCY = 4;
+
+    // normCacheDir: persistente entre reinicios del canal
+    const normCacheDir = path.join('/tmp', 'cloudtv-norm', session.channelId);
+    await fs.mkdir(normCacheDir, { recursive: true });
+
+    // videosDir: solo para archivos raw (se borra con hlsDir al parar)
     const videosDir = path.join(session.hlsDir, 'videos');
     await fs.mkdir(videosDir, { recursive: true });
 
-    const downloadedMp4s: string[] = [];
-    // Map correcto índice→path (downloadedMp4s puede tener huecos si fallan descargas)
     const downloadedMap  = new Map<number, string>();
-    // Items que aún no tienen norm en caché → se normalizarán en background mientras el stream corre
     const pendingNorm: Array<{ rawPath: string; normPath: string }> = [];
     let totalDuration = 0;
+
+    // ── Fase 1: clasificar cada video (caché hit vs descarga necesaria) ───────
+    type DlTask = {
+      i: number;
+      type: 'prenorm' | 'raw';
+      srcKey: string;
+      destPath: string;
+      rawPath: string;
+      normPath: string;
+      duration: number;
+    };
+    const toDownload: DlTask[] = [];
 
     for (let i = 0; i < playlist.items.length; i++) {
       if (session.stopping) return;
       const item    = playlist.items[i];
-      const videoId  = item.video.id;
-      const dur      = item.video.duration?.toFixed(1) ?? '?';
-      const rawPath  = path.join(videosDir, `raw_${videoId}.mp4`);
-      const normPath = path.join(videosDir, `norm_${qKeyEarly}_${videoId}.mp4`);
+      const videoId = item.video.id;
+      const dur     = item.video.duration ?? 0;
+      const rawPath  = path.join(videosDir,    `raw_${videoId}.mp4`);
+      const normPath = path.join(normCacheDir, `norm_${qKeyEarly}_${videoId}.mp4`);
 
-      // ── Opción B: key pre-normalizada en S3 para la calidad del canal ──────────────────
-      // Videos procesados con el pipeline nuevo tienen norm_Xp en S3; se descargan
-      // directamente al normPath → cero normalización en tiempo de emisión.
       const normKeyDb: string | null | undefined =
         qKeyEarly === '480p'  ? item.video.norm480pKey  :
         qKeyEarly === '720p'  ? item.video.norm720pKey  :
         qKeyEarly === '1080p' ? item.video.norm1080pKey :
         null;
 
-      // 1. Caché local norm disponible → reutilizar (reinicio rápido, stream-copy)
+      // Caché persistente: archivo ya descargado → reutilizar sin tocar S3
       let normExists = false;
       try { await fs.access(normPath); normExists = true; } catch { /* no existe */ }
       if (normExists) {
-        this.log(session, `  ✓ [norm-cache] ${i + 1}/${playlist.items.length} · ${dur}s`);
-        downloadedMp4s.push(normPath);
+        this.log(session, `  ✓ [cache] ${i + 1}/${playlist.items.length} · ${dur.toFixed(1)}s`);
         downloadedMap.set(i, normPath);
-        if (item.video.duration) totalDuration += item.video.duration;
+        totalDuration += dur;
         continue;
       }
 
-      // 2. Pre-normalizado en S3 (Opción B) → descargar directo al normPath, sin bg-norm
+      // Pre-normalizado en S3 (Opción B) → encolar descarga paralela
       if (normKeyDb) {
-        this.log(session, `  ↓ [prenorm-${qKeyEarly}] ${i + 1}/${playlist.items.length}: descargando…`);
-        try {
-          await this.storage.downloadToFile(normKeyDb, normPath);
-          this.log(session, `  ✓ [prenorm] ${i + 1}/${playlist.items.length} · ${dur}s`);
-          downloadedMp4s.push(normPath);
-          downloadedMap.set(i, normPath);
-          if (item.video.duration) totalDuration += item.video.duration;
-          continue; // ← no va a pendingNorm: ya está normalizado
-        } catch (err: any) {
-          this.log(session, `  WARN: fallo descargando prenorm, usando raw: ${err.message}`);
-          // fallthrough → descarga raw como respaldo
-        }
+        toDownload.push({ i, type: 'prenorm', srcKey: normKeyDb, destPath: normPath, rawPath, normPath, duration: dur });
+        continue;
       }
 
-      // 3. Fallback: descargar raw + normalizar en background (videos sin prenorm en S3)
+      // Fallback: raw → encolar descarga paralela + normalizar después
       const rawKey = item.video.processedKey ?? item.video.originalKey;
       if (!rawKey) { this.log(session, `  WARN: video ${videoId} sin key`); continue; }
+      toDownload.push({ i, type: 'raw', srcKey: rawKey, destPath: rawPath, rawPath, normPath, duration: dur });
+    }
 
-      let rawExists = false;
-      try { await fs.access(rawPath); rawExists = true; } catch { /* no existe */ }
-      if (!rawExists) {
-        this.log(session, `  ↓ [raw] ${i + 1}/${playlist.items.length}: ${rawKey}`);
+    // ── Fase 2: descargar en paralelo (DOWNLOAD_CONCURRENCY simultáneos) ─────
+    if (toDownload.length > 0) {
+      this.log(session, `↓ Descargando ${toDownload.length} video(s) en paralelo (${DOWNLOAD_CONCURRENCY} simultáneos)…`);
+    }
+    for (let b = 0; b < toDownload.length; b += DOWNLOAD_CONCURRENCY) {
+      if (session.stopping) return;
+      const batch = toDownload.slice(b, b + DOWNLOAD_CONCURRENCY);
+      await Promise.all(batch.map(async (task) => {
+        const label = `${task.i + 1}/${playlist.items.length}`;
         try {
-          await this.storage.downloadToFile(rawKey, rawPath);
+          await this.storage.downloadToFile(task.srcKey, task.destPath);
+          if (task.type === 'raw') {
+            await this.ensureFaststart(task.rawPath).catch(() => {});
+          }
+          downloadedMap.set(task.i, task.destPath);
+          if (task.type === 'raw') pendingNorm.push({ rawPath: task.rawPath, normPath: task.normPath });
+          totalDuration += task.duration;
+          this.log(session, `  ✓ [${task.type}] ${label} · ${task.duration.toFixed(1)}s`);
         } catch (err: any) {
-          this.log(session, `  ERROR descargando ${rawKey}: ${err.message}`);
-          continue;
+          this.log(session, `  ERROR descargando ${label}: ${err.message}`);
         }
-        // Asegurar faststart: si el moov no está al inicio, reescribir (stream-copy, rápido).
-        // Sin faststart, el concat demuxer hace seek hasta el final del archivo al abrirlo,
-        // congelando el pipeline de video durante varios segundos en archivos grandes.
-        await this.ensureFaststart(rawPath).catch(() => {});
-      }
-
-      // Raw disponible → usar ahora; normalizar en background para próxima ejecución
-      this.log(session, `  ✓ [raw] ${i + 1}/${playlist.items.length} · ${dur}s (bg-norm pendiente)`);
-      downloadedMp4s.push(rawPath);
-      downloadedMap.set(i, rawPath);
-      pendingNorm.push({ rawPath, normPath });
-      if (item.video.duration) totalDuration += item.video.duration;
+      }));
     }
 
     // ── Normalización broadcast SÍNCRONA ──────────────────────────────────────────
@@ -457,9 +461,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    this.log(session, `Preparación: ${downloadedMp4s.length} video(s) · ${(totalDuration / 60).toFixed(1)} min`);
+    this.log(session, `Preparación: ${downloadedMap.size} video(s) · ${(totalDuration / 60).toFixed(1)} min`);
 
-    if (downloadedMp4s.length === 0) {
+    if (downloadedMap.size === 0) {
       this.log(session, 'ERROR: No se pudo descargar ningún video.');
       await this.prisma.channel.update({ where: { id: session.channelId }, data: { status: 'ERROR' } });
       return;
