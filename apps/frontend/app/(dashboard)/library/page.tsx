@@ -2,11 +2,11 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
-import { Film, Upload, Search, Grid3X3, List, RefreshCw, Folder, FolderOpen } from 'lucide-react';
+import { Film, Upload, Search, Grid3X3, List, RefreshCw, Folder, FolderOpen, Zap } from 'lucide-react';
 import { Header } from '@/components/dashboard/Header';
 import { VideoCard } from '@/components/library/VideoCard';
 import { VideoStatusBadge } from '@/components/library/VideoStatusBadge';
-import { useVideos, useUpdateVideo, useDeleteVideo } from '@/hooks/useVideos';
+import { useVideos, useUpdateVideo, useDeleteVideo, usePrenormalizeVideos } from '@/hooks/useVideos';
 import apiClient from '@/lib/api-client';
 import { formatDuration, formatBytes } from '@/lib/utils';
 import { cn } from '@/lib/utils';
@@ -28,6 +28,7 @@ export default function LibraryPage() {
   const { data: videos = [], isLoading, refetch } = useVideos(channelId);
   const updateVideo = useUpdateVideo();
   const deleteVideo = useDeleteVideo();
+  const prenormalize = usePrenormalizeVideos();
 
   // Carpetas únicas derivadas de los videos
   const folders = useMemo(() => {
@@ -111,6 +112,24 @@ export default function LibraryPage() {
             >
               <RefreshCw className="w-3.5 h-3.5 animate-spin" />
               {processingCount} procesando
+            </button>
+          )}
+
+          {/* Pre-normalizar: prepara videos viejos para emisión instantánea */}
+          {channelId && videos.some((v) => v.status === 'READY') && (
+            <button
+              onClick={() => prenormalize.mutate(channelId)}
+              disabled={prenormalize.isPending}
+              title="Normaliza al formato broadcast todos los videos que aún no están optimizados. Solo toca los que faltan; los que ya están listos no se vuelven a procesar."
+              className={cn(
+                'flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border transition-colors',
+                prenormalize.isPending
+                  ? 'border-amber-500/30 bg-amber-500/10 text-amber-400 cursor-wait'
+                  : 'border-white/10 bg-surface-700 text-slate-300 hover:border-white/20 hover:text-white',
+              )}
+            >
+              <Zap className={cn('w-4 h-4', prenormalize.isPending && 'animate-pulse')} />
+              {prenormalize.isPending ? 'Encolando…' : 'Pre-normalizar'}
             </button>
           )}
 

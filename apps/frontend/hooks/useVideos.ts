@@ -63,6 +63,28 @@ export function useUpdateVideo() {
   });
 }
 
+export function usePrenormalizeVideos() {
+  return useMutation({
+    mutationFn: (channelId: string) =>
+      apiClient.post<{ queued: number; alreadyReady: number }>(
+        '/videos/prenormalize',
+        null,
+        { params: { channelId } },
+      ),
+    onSuccess: ({ data }) => {
+      if (data.queued === 0) {
+        toast.success('Todos los videos ya están optimizados para emisión');
+      } else {
+        toast.success(
+          `${data.queued} video${data.queued > 1 ? 's' : ''} encolado${data.queued > 1 ? 's' : ''} para normalización — ` +
+          `quedarán listos en background`,
+        );
+      }
+    },
+    onError: () => toast.error('Error al iniciar la pre-normalización'),
+  });
+}
+
 export function useDeleteVideo() {
   const queryClient = useQueryClient();
 

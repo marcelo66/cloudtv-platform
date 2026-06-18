@@ -101,6 +101,17 @@ export class VideosController {
 
   // ─── CRUD ──────────────────────────────────────────────────────
 
+  @Post('prenormalize')
+  @ApiOperation({ summary: 'Pre-normalizar videos del canal sin norm keys (los encola para el worker)' })
+  @ApiQuery({ name: 'channelId', required: true })
+  prenormalize(
+    @CurrentUser('id') userId: string,
+    @Query('channelId') channelId: string,
+  ) {
+    if (!channelId) throw new BadRequestException('channelId requerido');
+    return this.videosService.prenormalizeChannel(userId, channelId);
+  }
+
   @Get()
   @ApiOperation({ summary: 'Listar videos de un canal' })
   @ApiQuery({ name: 'channelId', required: true })

@@ -231,6 +231,49 @@ export class VideosService {
     });
   }
 
+  // ─── Pre-normalización (videos viejos sin norm keys) ─────────
+  //
+  // Encola todos los videos READY del canal que no tienen norm_720p_key
+  // en S3 (subidos antes de Option B). El worker los descarga del original
+  // y genera las 3 variantes broadcast → se guardan en S3 igual que en el
+  // upload normal. Al finalizar, el playout los encuentra en Path 2 y arranca
+  // instantáneamente sin ninguna normalización en tiempo de emisión.
+
+  async prenormalizeChannel(userId: string, channelId: string): Promise<{ queued: number; alreadyReady: number }> {
+    const channel = await this.prisma.channel.findFirst({
+      where: { id: channelId, userId },
+    });
+    if (!channel) throw new ForbiddenException();
+
+    const videos = await this.prisma.video.findMany({
+      where: { channelId, status: 'READY', norm720pKey: null },
+      select: { id: true, originalKey: true },
+    });
+
+    const total = await this.prisma.video.count({
+      where: { channelId, status: 'READY' },
+    });
+
+    let queued = 0;
+    for (const video of videos) {
+      if (!video.originalKey) continue;
+      await this.videoQueue.add(
+        'renormalize-video',
+        { videoId: video.id, channelId, originalKey: video.originalKey } as VideoProcessingJobData,
+        {
+          attempts: 2,
+          backoff: { type: 'exponential', delay: 5000 },
+          removeOnComplete: { age: 86400 },
+          removeOnFail: { age: 604800 },
+        },
+      );
+      queued++;
+    }
+
+    this.logger.log(`Queued ${queued} videos for renormalization in channel ${channelId}`);
+    return { queued, alreadyReady: total - videos.length };
+  }
+
   async remove(userId: string, videoId: string) {
     const video = await this.findOne(userId, videoId);
 

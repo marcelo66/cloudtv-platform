@@ -30,6 +30,78 @@ export class VideoProcessor extends WorkerHost {
   }
 
   async process(job: Job<VideoProcessingJobData>): Promise<void> {
+    if (job.name === 'renormalize-video') {
+      return this.processRenormalize(job);
+    }
+    return this.processUpload(job);
+  }
+
+  // ─── Re-normalización de videos viejos (sin norm keys en S3) ────────────────
+  //
+  // Job name: 'renormalize-video'
+  // Solo descarga el original y genera las 3 variantes broadcast.
+  // No regenera thumbnail ni metadata (ya existen en BD).
+  //
+  private async processRenormalize(job: Job<VideoProcessingJobData>): Promise<void> {
+    const { videoId, channelId, originalKey } = job.data;
+    const tmpDir = path.join(os.tmpdir(), 'cloudtv', `renorm_${videoId}`);
+
+    this.logger.log(`Re-normalizing video ${videoId} (job ${job.id})`);
+
+    try {
+      await fs.mkdir(tmpDir, { recursive: true });
+      const ext = path.extname(originalKey) || '.mp4';
+      const inputPath = path.join(tmpDir, `input${ext}`);
+
+      await job.updateProgress(5);
+      this.logger.debug(`Downloading original ${originalKey}`);
+      await this.storage.downloadToFile(originalKey, inputPath);
+      await job.updateProgress(20);
+
+      const qualities: BroadcastQuality[] = ['480p', '720p', '1080p'];
+      const normKeyMap: Record<string, string> = {};
+
+      for (let qi = 0; qi < qualities.length; qi++) {
+        const q = qualities[qi];
+        const normPath = path.join(tmpDir, `norm_${q}.mp4`);
+
+        this.logger.log(`Re-normalizing to ${q} (${qi + 1}/3)…`);
+        await this.ffmpeg.normalizeToBroadcast(inputPath, normPath, q);
+
+        const normKey = this.storage.buildNormKey(channelId, videoId, q);
+        await this.storage.putObject(normKey, createReadStream(normPath), 'video/mp4');
+        normKeyMap[q] = normKey;
+
+        await fs.rm(normPath).catch(() => {});
+        await job.updateProgress(20 + (qi + 1) * 25);
+        this.logger.log(`✓ renorm_${q}: ${normKey}`);
+      }
+
+      await this.prisma.video.update({
+        where: { id: videoId },
+        data: {
+          norm480pKey:  normKeyMap['480p'],
+          norm720pKey:  normKeyMap['720p'],
+          norm1080pKey: normKeyMap['1080p'],
+          processedKey: normKeyMap['720p'],
+        },
+      });
+
+      await job.updateProgress(100);
+      this.logger.log(`✓ Re-normalization complete for video ${videoId}`);
+    } catch (error) {
+      this.logger.error(`✗ Re-normalization failed for ${videoId}: ${error.message}`, error.stack);
+      throw error;
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  // ─── Procesamiento de upload nuevo (pipeline completo) ───────────────────────
+  //
+  // Job name: 'process-video' (default)
+  //
+  private async processUpload(job: Job<VideoProcessingJobData>): Promise<void> {
     const { videoId, channelId, originalKey } = job.data;
     const tmpDir = path.join(os.tmpdir(), 'cloudtv', videoId);
 
