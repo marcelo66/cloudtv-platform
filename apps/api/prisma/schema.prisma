@@ -19,6 +19,7 @@ model User {
   role         Role     @default(USER)
   plan         Plan     @default(FREE)
   isActive     Boolean  @default(true) @map("is_active")
+  maxChannels  Int?     @map("max_channels")
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 

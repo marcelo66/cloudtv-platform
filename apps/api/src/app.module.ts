@@ -19,6 +19,7 @@ import { AdReportsModule } from './modules/ad-reports/ad-reports.module';
 import { ZeroTierModule } from './modules/zerotier/zerotier.module';
 import { IngestModule } from './modules/ingest/ingest.module';
 import { YoutubeAuthModule } from './modules/youtube-auth/youtube-auth.module';
+import { AdminModule } from './modules/admin/admin.module';
 
 @Module({
   imports: [
@@ -64,6 +65,7 @@ import { YoutubeAuthModule } from './modules/youtube-auth/youtube-auth.module';
     ZeroTierModule,
     IngestModule,
     YoutubeAuthModule,
+    AdminModule,
     WorkerModule,
   ],
 })

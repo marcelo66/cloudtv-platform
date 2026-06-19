@@ -8,6 +8,7 @@ import slugify from 'slugify';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateChannelDto, UpdateChannelDto } from './dto/create-channel.dto';
 import { PlayoutService } from '../playout/playout.service';
+import { PLAN_LIMITS } from '../common/constants/plan-limits';
 
 @Injectable()
 export class ChannelsService {
@@ -17,6 +18,18 @@ export class ChannelsService {
   ) {}
 
   async create(userId: string, dto: CreateChannelDto) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (user) {
+      const channelCount = await this.prisma.channel.count({ where: { userId } });
+      const planLimit = PLAN_LIMITS[user.plan]?.maxChannels ?? 1;
+      const effectiveLimit = user.maxChannels ?? planLimit;
+      if (channelCount >= effectiveLimit) {
+        throw new ForbiddenException(
+          `Tu plan ${user.plan} permite máximo ${effectiveLimit} canal(es). Actualiza tu plan para crear más.`,
+        );
+      }
+    }
+
     let slug = dto.slug || slugify(dto.name, { lower: true, strict: true });
 
     // Verificar unicidad del slug
