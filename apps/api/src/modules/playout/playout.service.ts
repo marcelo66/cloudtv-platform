@@ -373,9 +373,21 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         continue;
       }
 
-      // Fallback: raw → encolar descarga paralela + normalizar después
+      // Fallback: raw → check disco primero, luego encolar descarga
       const rawKey = item.video.processedKey ?? item.video.originalKey;
       if (!rawKey) { this.log(session, `  WARN: video ${videoId} sin key`); continue; }
+
+      // Raw file puede sobrevivir reinicios soft (scheduleChangePending no borra hlsDir)
+      let rawExists = false;
+      try { await fs.access(rawPath); rawExists = true; } catch { /* no existe */ }
+      if (rawExists) {
+        this.log(session, `  ✓ [raw-disk] ${i + 1}/${playlist.items.length} · ${dur.toFixed(1)}s`);
+        downloadedMap.set(i, rawPath);
+        pendingNorm.push({ rawPath, normPath });
+        totalDuration += dur;
+        continue;
+      }
+
       toDownload.push({ i, type: 'raw', srcKey: rawKey, destPath: rawPath, rawPath, normPath, duration: dur });
     }
 
@@ -734,9 +746,14 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     const normalizeVf = `scale=${scale}:force_original_aspect_ratio=decrease,pad=${scale}:(ow-iw)/2:(oh-ih)/2:black,fps=25,format=yuv420p`;
 
     // Flags de tolerancia en el input: descarta paquetes corruptos / regenera PTS faltantes.
+    // probesize + analyzeduration: limitan cuánto sondea FFmpeg cada archivo al hacer
+    // la transición entre clips del concat. Sin esto, un MP4 con moov al final puede
+    // causar un stall de 30-60s mientras FFmpeg busca los metadatos del siguiente archivo.
     const inputFlags = [
       '-fflags', '+genpts+discardcorrupt',
       '-err_detect', 'ignore_err',
+      '-probesize', '4M',
+      '-analyzeduration', '5000000',
     ];
 
     // ─── RUTAS FFmpeg ──────────────────────────────────────────────────────────────
@@ -1568,7 +1585,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
    */
   private startSegmentWatchdog(session: PlayoutSession, m3u8Path: string): void {
     const POLL_MS  = 5_000;   // comprobar cada 5 s
-    const STALL_MS = 15_000;  // 15 s sin nuevo segmento = FFmpeg estancado (7.5× hls_time 2s)
+    const STALL_MS = 45_000;  // 45 s sin nuevo segmento = FFmpeg estancado
+    // 45s: el concat demuxer puede tardar 30s+ en abrir el siguiente archivo si es un
+    // MP4 raw grande (moov al final). Con archivos prenorm el stall no ocurre (< 1s).
 
     let lastMtime    = 0;
     let lastUpdateAt = Date.now();
