@@ -403,63 +403,59 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       }));
     }
 
-    // ── Normalización broadcast SÍNCRONA ──────────────────────────────────────────
+    // ── Normalización broadcast EN BACKGROUND ────────────────────────────────────
     //
-    // Se espera a que todos los archivos estén en formato broadcast canónico ANTES
-    // de lanzar FFmpeg. Garantiza stream-copy puro desde el primer frame: sin
-    // tirones, sin freezes en transiciones, sin reinicios mid-stream.
+    // FFmpeg arranca INMEDIATAMENTE con los archivos disponibles:
     //
-    // Para videos procesados con Opción B (prenorm en S3): este bloque no se ejecuta
-    // porque pendingNorm siempre estará vacío (ya se descargaron los norm_Xp.mp4).
-    // Para videos anteriores (sin prenorm): se normalizan una sola vez; en
-    // reinicios posteriores se encuentran en caché local → arranque inmediato.
+    //   · Videos con prenorm en S3 (Opción B) → normPath descargado → allNormalized=true
+    //     → FFmpeg usa Ruta B (stream-copy). Sin re-encode, sin delay.
+    //
+    //   · Videos sin prenorm (raw) → rawPath descargado → allNormalized=false
+    //     → FFmpeg usa Ruta C (re-encode en tiempo real). Emite en segundos.
+    //     → Normalización corre en background. Al terminar: reinicio limpio
+    //       → próximo arranque usa normPath del caché → Ruta B stream-copy.
+    //
+    // La clave: NUNCA bloqueamos esperando la normalización. El canal emite
+    // en cuanto los archivos (raw o prenorm) están descargados.
+
     const allNormalized = pendingNorm.length === 0;
 
     if (allNormalized) {
-      this.log(session, `✓ Todo broadcast-ready → stream-copy disponible`);
-    } else if (session.bgNormRunning) {
-      // Una normalización de un reinicio anterior sigue en progreso — esperar a que termine
-      this.log(session, `⏳ Esperando normalización en curso (${pendingNorm.length} pendiente(s))…`);
-      while (session.bgNormRunning && !session.stopping) {
-        await new Promise<void>(r => setTimeout(r, 500));
-      }
-      if (session.stopping) return;
-      this.log(session, `✓ Normalización previa completada`);
-    } else {
-      // Ordenar de más corto a más largo: los clips breves terminan primero
-      pendingNorm.sort((a, b) => {
-        const durA = playlist.items.find(it => a.rawPath.includes(it.video.id))?.video.duration ?? 0;
-        const durB = playlist.items.find(it => b.rawPath.includes(it.video.id))?.video.duration ?? 0;
-        return durA - durB;
-      });
-      this.log(session, `⚙ Normalizando ${pendingNorm.length} video(s) a formato broadcast…`);
+      this.log(session, `✓ Todo broadcast-ready → stream-copy desde el primer frame`);
+    } else if (!session.bgNormRunning) {
+      // Lanzar normalización en background: no bloquea el arranque
       session.bgNormRunning = true;
-      let normDone = 0;
-      for (const { rawPath, normPath } of pendingNorm) {
-        if (session.stopping) { session.bgNormRunning = false; return; }
-        try {
-          await this.normalizeVideoForBroadcast(rawPath, normPath, qualityEarly);
-          normDone++;
-          this.log(session, `  ✓ [norm] ${normDone}/${pendingNorm.length} → ${path.basename(normPath)}`);
-        } catch (err: any) {
-          this.log(session, `  ✗ [norm] falló ${path.basename(rawPath)}: ${err.message}`);
+      this.log(session, `⚙ Normalizando ${pendingNorm.length} video(s) en background — FFmpeg arranca con raw (re-encode)`);
+      const normQueue = [...pendingNorm].sort((a, b) => {
+        const dA = playlist.items.find(it => a.rawPath.includes(it.video.id))?.video.duration ?? 0;
+        const dB = playlist.items.find(it => b.rawPath.includes(it.video.id))?.video.duration ?? 0;
+        return dA - dB; // más cortos primero
+      });
+      (async () => {
+        let done = 0;
+        for (const { rawPath, normPath } of normQueue) {
+          if (session.stopping) { session.bgNormRunning = false; return; }
+          try {
+            await this.normalizeVideoForBroadcast(rawPath, normPath, qualityEarly);
+            done++;
+            this.log(session, `  ✓ [bg-norm] ${done}/${normQueue.length} → ${path.basename(normPath)}`);
+          } catch (err: any) {
+            this.log(session, `  ✗ [bg-norm] falló ${path.basename(rawPath)}: ${err.message}`);
+          }
         }
-      }
-      session.bgNormRunning = false;
-      if (session.stopping) return;
-      this.log(session, `✓ Normalización completa (${normDone}/${pendingNorm.length}) → arranque broadcast-ready`);
+        session.bgNormRunning = false;
+        // Reinicio limpio: la próxima launchFfmpeg encontrará norm files en caché → Ruta B
+        if (!session.stopping && this.sessions.has(session.channelId)) {
+          this.log(session, `✓ Normalización completa (${done}/${normQueue.length}) → reiniciando con archivos optimizados…`);
+          session.scheduleChangePending = true;
+          this.killSession(session);
+        }
+      })();
+    } else {
+      this.log(session, `⚙ Normalización background ya en progreso — FFmpeg arranca con raw disponible`);
     }
-
-    // Actualizar downloadedMap: reemplazar raw paths por norm paths donde ya estén listos
-    for (const [idx, filePath] of downloadedMap) {
-      const normEntry = pendingNorm.find(n => n.rawPath === filePath);
-      if (normEntry) {
-        try {
-          await fs.access(normEntry.normPath);   // confirmar que el archivo norm existe
-          downloadedMap.set(idx, normEntry.normPath);
-        } catch { /* norm falló; raw se mantiene como fallback */ }
-      }
-    }
+    // downloadedMap ya tiene los rawPaths; FFmpeg los usará con Ruta C.
+    // El reinicio post-norm resolverá los normPaths del caché persistente.
 
     this.log(session, `Preparación: ${downloadedMap.size} video(s) · ${(totalDuration / 60).toFixed(1)} min`);
 
