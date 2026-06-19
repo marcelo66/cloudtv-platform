@@ -1097,14 +1097,34 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       ? target.replace(/passphrase=[^&]+/, 'passphrase=***')
       : target.replace(/\/([^\/]+)$/, '/***');
 
-    const proc = spawn('ffmpeg', [
-      '-loglevel', 'warning',
-      '-re',
-      '-i', m3u8,
-      '-c', 'copy',
-      '-f', format,
-      target,
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const needsReencode = !!(output.customBitrate || output.customQuality);
+    const ffmpegArgs = (() => {
+      if (!needsReencode) {
+        return ['-loglevel', 'warning', '-re', '-i', m3u8, '-c', 'copy', '-f', format, target];
+      }
+      const QUALITY_PRESETS: Record<string, { scale: string; aBitrate: string }> = {
+        '480p':  { scale: 'scale=854:480',   aBitrate: '96k'  },
+        '720p':  { scale: 'scale=1280:720',  aBitrate: '128k' },
+        '1080p': { scale: 'scale=1920:1080', aBitrate: '192k' },
+      };
+      const preset = output.customQuality ? QUALITY_PRESETS[output.customQuality] : null;
+      const vBitrate = `${output.customBitrate ?? 2000}k`;
+      const vFilter  = preset ? ['-vf', preset.scale] : [];
+      const aBitrate = preset?.aBitrate ?? '128k';
+      return [
+        '-loglevel', 'warning',
+        '-re',
+        '-i', m3u8,
+        '-c:v', 'libx264', '-preset', 'veryfast', '-b:v', vBitrate,
+        '-maxrate', vBitrate, '-bufsize', `${(output.customBitrate ?? 2000) * 2}k`,
+        ...vFilter,
+        '-c:a', 'aac', '-b:a', aBitrate, '-ar', '44100',
+        '-f', format,
+        target,
+      ];
+    })();
+
+    const proc = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
 
     session.rtmpProcs.set(output.id, proc);
     this.log(session, `RTMP ${safeName} PID=${proc.pid} → ${safeTarget}`);

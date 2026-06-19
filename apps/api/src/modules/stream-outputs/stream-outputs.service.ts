@@ -63,6 +63,9 @@ export class StreamOutputsService {
         srtPort:       dto.srtPort       ?? null,
         srtLatency:    dto.srtLatency    ?? null,
         srtPassphrase: dto.srtPassphrase ?? null,
+        // Calidad por salida
+        customBitrate: dto.customBitrate ?? null,
+        customQuality: dto.customQuality ?? null,
       },
     });
   }
@@ -83,6 +86,9 @@ export class StreamOutputsService {
         ...(dto.srtPort       !== undefined && { srtPort:       dto.srtPort }),
         ...(dto.srtLatency    !== undefined && { srtLatency:    dto.srtLatency }),
         ...(dto.srtPassphrase !== undefined && { srtPassphrase: dto.srtPassphrase }),
+        // Calidad por salida
+        ...(dto.customBitrate !== undefined && { customBitrate: dto.customBitrate }),
+        ...(dto.customQuality !== undefined && { customQuality: dto.customQuality }),
       },
     });
   }

@@ -224,6 +224,9 @@ model StreamOutput {
   srtPort       Int?    @map("srt_port")       // Puerto SRT (default: 9001)
   srtLatency    Int?    @map("srt_latency")     // Latencia en milisegundos (default: 120 ms)
   srtPassphrase String? @map("srt_passphrase")  // Passphrase de cifrado AES (10-79 chars, opcional)
+  // ── Calidad de emisión por salida ─────────────────────────────────────────
+  customBitrate Int?    @map("custom_bitrate")  // kbps de video (null = stream-copy desde HLS)
+  customQuality String? @map("custom_quality")  // "480p" | "720p" | "1080p" (null = heredar del canal)
   createdAt DateTime     @default(now()) @map("created_at")
   updatedAt DateTime     @updatedAt @map("updated_at")
 

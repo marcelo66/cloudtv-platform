@@ -159,6 +159,18 @@ function OutputCard({
               <span>Cifrado AES habilitado</span>
             </div>
           )}
+          {(output.customQuality || output.customBitrate) && (
+            <div className="flex items-center gap-1.5 mt-1">
+              {output.customQuality && (
+                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-brand-500/10 text-brand-400 border border-brand-500/20">
+                  {output.customQuality}
+                </span>
+              )}
+              {output.customBitrate && (
+                <span className="text-[10px] font-mono text-slate-500">{output.customBitrate} kbps</span>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -437,6 +449,9 @@ function OutputFormModal({
   const [showPass,   setShowPass]   = useState(false);
   // ZeroTier picker
   const [showZt,     setShowZt]     = useState(false);
+  // Calidad por salida
+  const [customQuality, setCustomQuality] = useState<string>(output?.customQuality ?? '');
+  const [customBitrate, setCustomBitrate] = useState<string>(output?.customBitrate ? String(output.customBitrate) : '');
 
   const isSrt = PLATFORM_META[platform].isSrt ?? false;
   const isListener = platform === 'SRT_LISTENER';
@@ -497,6 +512,12 @@ function OutputFormModal({
       streamKey: streamKey.trim(),
     } : {};
 
+    const parsedBitrate = parseInt(customBitrate, 10);
+    const qualityInput = {
+      customQuality: customQuality || null,
+      customBitrate: customBitrate && !isNaN(parsedBitrate) ? parsedBitrate : null,
+    };
+
     if (isEdit) {
       updateMut.mutate(
         {
@@ -504,7 +525,7 @@ function OutputFormModal({
           id: output!.id,
           input: {
             name: name.trim(), enabled,
-            ...srtInput, ...rtmpInput,
+            ...srtInput, ...rtmpInput, ...qualityInput,
           },
         },
         { onSuccess: onClose },
@@ -515,7 +536,7 @@ function OutputFormModal({
           channelId,
           input: {
             name: name.trim(), platform, enabled,
-            ...srtInput, ...rtmpInput,
+            ...srtInput, ...rtmpInput, ...qualityInput,
           } as CreateOutputInput,
         },
         { onSuccess: onClose },
@@ -831,6 +852,60 @@ function OutputFormModal({
               </div>
             </>
           )}
+
+          {/* ── Calidad de emisión ────────────────────── */}
+          <div className="pt-1 border-t border-surface-700">
+            <p className="text-xs font-medium text-slate-400 mb-2">
+              Calidad de emisión
+              <span className="text-slate-600 font-normal ml-1">(opcional — por defecto hereda el canal)</span>
+            </p>
+            <div className="grid grid-cols-4 gap-2 mb-3">
+              {(['', '480p', '720p', '1080p'] as const).map(q => (
+                <button
+                  key={q || 'auto'}
+                  type="button"
+                  onClick={() => setCustomQuality(q)}
+                  className={cn(
+                    'py-1.5 rounded-lg border text-xs font-medium transition-all',
+                    customQuality === q
+                      ? 'border-brand-500/60 bg-brand-500/15 text-brand-300'
+                      : 'border-surface-600 bg-surface-700 text-slate-400 hover:border-surface-500',
+                  )}
+                >
+                  {q || 'Auto'}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-slate-400 flex-shrink-0">Bitrate (kbps)</label>
+              <input
+                type="number"
+                min={500}
+                max={50000}
+                value={customBitrate}
+                onChange={e => setCustomBitrate(e.target.value)}
+                placeholder="Ej: 2000"
+                className="flex-1 bg-surface-700 border border-surface-600 rounded-lg px-3 py-1.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 font-mono"
+              />
+              {customBitrate && (
+                <button
+                  type="button"
+                  onClick={() => setCustomBitrate('')}
+                  className="text-slate-500 hover:text-slate-300 text-xs px-2 py-1 rounded hover:bg-surface-700"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+            {(customQuality || customBitrate) && (
+              <div className="mt-2 p-2 rounded-lg bg-amber-500/5 border border-amber-500/15">
+                <p className="text-[11px] text-amber-300/80">
+                  Re-encodeará el stream en tiempo real — consume más CPU del servidor.
+                  {!customBitrate && ' Especificar un bitrate es recomendable.'}
+                </p>
+              </div>
+            )}
+          </div>
 
           {/* Habilitado */}
           <div className="flex items-center justify-between pt-1 border-t border-surface-700">

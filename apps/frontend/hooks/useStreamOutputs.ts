@@ -18,6 +18,9 @@ export interface StreamOutput {
   srtPort?:       number | null;
   srtLatency?:    number | null;
   srtPassphrase?: string | null;
+  // Calidad por salida
+  customBitrate?: number | null;
+  customQuality?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -34,6 +37,9 @@ export interface CreateOutputInput {
   srtPort?:     number;
   srtLatency?:  number;
   srtPassphrase?: string;
+  // Calidad por salida
+  customBitrate?: number | null;
+  customQuality?: string | null;
 }
 
 export interface UpdateOutputInput {
@@ -44,6 +50,8 @@ export interface UpdateOutputInput {
   srtPort?:     number;
   srtLatency?:  number;
   srtPassphrase?: string;
+  customBitrate?: number | null;
+  customQuality?: string | null;
 }
 
 // ─── Platform metadata ────────────────────────────────────────

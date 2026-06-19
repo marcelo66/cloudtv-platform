@@ -11,6 +11,8 @@ import {
 } from 'class-validator';
 import { Platform } from '@prisma/client';
 
+type Quality = '480p' | '720p' | '1080p';
+
 export class CreateStreamOutputDto {
   @IsString()
   @IsNotEmpty()
@@ -65,6 +67,20 @@ export class CreateStreamOutputDto {
   @IsOptional()
   @MaxLength(79)
   srtPassphrase?: string;
+
+  // ── Calidad de emisión personalizada ──────────────────────────────────────
+
+  /** Bitrate de video en kbps (500-50000). null = stream-copy desde HLS. */
+  @IsInt()
+  @Min(500)
+  @Max(50000)
+  @IsOptional()
+  customBitrate?: number | null;
+
+  /** Resolución de salida. null = heredar del canal. */
+  @IsEnum(['480p', '720p', '1080p'])
+  @IsOptional()
+  customQuality?: Quality | null;
 }
 
 export class UpdateStreamOutputDto {
@@ -101,4 +117,14 @@ export class UpdateStreamOutputDto {
   @IsOptional()
   @MaxLength(79)
   srtPassphrase?: string;
+
+  @IsInt()
+  @Min(500)
+  @Max(50000)
+  @IsOptional()
+  customBitrate?: number | null;
+
+  @IsEnum(['480p', '720p', '1080p'])
+  @IsOptional()
+  customQuality?: Quality | null;
 }
