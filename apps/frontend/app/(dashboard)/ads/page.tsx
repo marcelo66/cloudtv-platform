@@ -25,6 +25,8 @@ import {
   TrendingUp,
   Users,
   PlaySquare,
+  EyeOff,
+  Eye,
 } from 'lucide-react';
 import { Header } from '@/components/dashboard/Header';
 import { useChannels } from '@/hooks/useChannels';
@@ -282,6 +284,10 @@ function AdBlockCard({
     updateBlock.mutate({ channelId, id: block.id, input: { isActive: !block.isActive } });
   };
 
+  const handleToggleSuppressOverlays = () => {
+    updateBlock.mutate({ channelId, id: block.id, input: { suppressOverlays: !block.suppressOverlays } });
+  };
+
   return (
     <div className={cn('glass-card overflow-hidden transition-all', !block.isActive && 'opacity-60')}>
       {/* Header */}
@@ -301,7 +307,7 @@ function AdBlockCard({
           ) : (
             <p className="text-sm font-semibold text-white truncate">{block.name}</p>
           )}
-          <div className="flex items-center gap-2 mt-0.5">
+          <div className="flex items-center gap-2 mt-0.5 flex-wrap">
             <RotIcon className="w-3 h-3 text-slate-500" />
             <span className="text-xs text-slate-500">{ROTATION_MODE_LABELS[block.rotationMode]}</span>
             <span className="text-slate-600">·</span>
@@ -312,10 +318,32 @@ function AdBlockCard({
                 <span className="text-xs text-slate-500">{block._count.cuePoints} cue point{block._count.cuePoints !== 1 ? 's' : ''}</span>
               </>
             ) : null}
+            {block.suppressOverlays && (
+              <span className="flex items-center gap-1 text-[10px] text-amber-400/80 font-medium">
+                <EyeOff className="w-2.5 h-2.5" />
+                sin overlays
+              </span>
+            )}
           </div>
         </div>
 
         <div className="flex items-center gap-1">
+          {/* Suppress overlays toggle */}
+          <button
+            onClick={handleToggleSuppressOverlays}
+            title={block.suppressOverlays
+              ? 'Logo/hora se ocultan durante esta tanda (click para desactivar)'
+              : 'Overlays visibles durante esta tanda (click para ocultar)'}
+            className={cn(
+              'p-1.5 rounded transition-colors',
+              block.suppressOverlays
+                ? 'text-amber-400 hover:text-amber-300'
+                : 'text-slate-600 hover:text-slate-400',
+            )}
+          >
+            {block.suppressOverlays ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+          </button>
+
           {/* Active toggle */}
           <button
             onClick={handleToggleActive}

@@ -71,6 +71,7 @@ export class AdBlocksService {
         name: dto.name,
         description: dto.description,
         rotationMode: dto.rotationMode ?? RotationMode.SEQUENTIAL,
+        suppressOverlays: false,
       },
       include: { spots: { include: { video: { select: { id: true, title: true, duration: true, status: true, thumbnailUrl: true } } }, orderBy: { order: 'asc' } } },
     });
@@ -117,7 +118,13 @@ export class AdBlocksService {
     await this.ensureAdBlockOwnership(adBlockId, channelId);
     return this.prisma.adBlock.update({
       where: { id: adBlockId },
-      data: dto,
+      data: {
+        ...(dto.name             !== undefined && { name:             dto.name }),
+        ...(dto.description      !== undefined && { description:      dto.description }),
+        ...(dto.rotationMode     !== undefined && { rotationMode:     dto.rotationMode }),
+        ...(dto.isActive         !== undefined && { isActive:         dto.isActive }),
+        ...(dto.suppressOverlays !== undefined && { suppressOverlays: dto.suppressOverlays }),
+      },
       include: {
         spots: {
           include: { video: { select: { id: true, title: true, duration: true, status: true } } },

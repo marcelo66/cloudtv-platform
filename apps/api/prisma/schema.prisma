@@ -278,9 +278,10 @@ model AdBlock {
   description   String?
   rotationMode  RotationMode @default(SEQUENTIAL) @map("rotation_mode")
   sequenceIndex Int          @default(0) @map("sequence_index")
-  isActive      Boolean      @default(true) @map("is_active")
-  createdAt     DateTime     @default(now()) @map("created_at")
-  updatedAt     DateTime     @updatedAt @map("updated_at")
+  isActive         Boolean  @default(true)  @map("is_active")
+  suppressOverlays Boolean  @default(false) @map("suppress_overlays") // Oculta logo/hora/etc. durante esta tanda
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt      @map("updated_at")
 
   spots       AdSpot[]
   cuePoints   CuePoint[]

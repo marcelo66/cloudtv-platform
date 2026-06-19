@@ -45,6 +45,10 @@ export class UpdateAdBlockDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  suppressOverlays?: boolean;
 }
 
 // ─── Ad Spot DTOs ─────────────────────────────────────────────

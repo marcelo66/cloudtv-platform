@@ -572,18 +572,29 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     let totalAdsInjected = 0;
     let intervalElapsed = 0; // segundos de contenido acumulados desde la última tanda de intervalo
 
+    // Tracking de tiempo para suppress-overlays: calculamos los rangos de segundos
+    // dentro del concat que corresponden a publicidad con suppressOverlays=true.
+    // Estos rangos se usan para generar expresiones :enable='...' en buildOverlayFilter.
+    let currentConcatTime = 0;
+    const adTimeRanges: { start: number; end: number }[] = [];
+
     /** Inserta los spots rotados de un bloque en concatLines (fire-and-forget para impresiones) */
     const insertBlock = async (adBlock: any, type: string) => {
       const spots = await this.adBlocksService.getRotatedSpots(adBlock as AdBlockForPlayout);
+      const blockStart = currentConcatTime;
       for (const spot of spots) {
         const adPath = adDownloads.get(spot.videoId);
         if (!adPath) continue;
         concatLines.push(`file '${adPath}'`);
+        currentConcatTime += spot.video.duration ?? 30;
         totalAdsInjected++;
         this.adBlocksService.recordImpression(
           spot.id, adBlock.id, session.channelId,
           spot.advertiser, type, spot.video.duration,
         ).catch(() => {});
+      }
+      if ((adBlock as any).suppressOverlays && currentConcatTime > blockStart) {
+        adTimeRanges.push({ start: blockStart, end: currentConcatTime });
       }
     };
 
@@ -615,6 +626,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         concatLines.push(`file '${mp4Path}'`);
         if (item.trimStart) concatLines.push(`inpoint ${item.trimStart}`);
         if (item.trimEnd)   concatLines.push(`outpoint ${item.trimEnd}`);
+        currentConcatTime += (item.trimEnd ?? videoDuration) - (item.trimStart ?? 0);
       } else {
         let inpoint: number = item.trimStart ?? 0;
         for (const cp of midRolls) {
@@ -622,12 +634,14 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           concatLines.push(`file '${mp4Path}'`);
           if (inpoint > 0) concatLines.push(`inpoint ${inpoint}`);
           concatLines.push(`outpoint ${outpoint}`);
+          currentConcatTime += outpoint - inpoint;
           await insertBlock(cp.adBlock, 'MID_ROLL');
           inpoint = outpoint;
         }
         concatLines.push(`file '${mp4Path}'`);
         if (inpoint > 0)   concatLines.push(`inpoint ${inpoint}`);
         if (item.trimEnd)  concatLines.push(`outpoint ${item.trimEnd}`);
+        currentConcatTime += (item.trimEnd ?? videoDuration) - inpoint;
       }
 
       // POST_ROLL de cue points
@@ -678,6 +692,22 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     const scale   = quality.scale;
     this.log(session, `Calidad: ${qKey} → ${scale} @ ${quality.vBitrate} video / ${quality.aBitrate} audio`);
 
+    // Expandir rangos de supresión de overlays para todos los ciclos repetidos.
+    // currentConcatTime ahora contiene la duración real de 1 ciclo del concat.
+    const baseCycleDuration = currentConcatTime;
+    const expandedAdRanges: { start: number; end: number }[] = [];
+    if (adTimeRanges.length > 0 && baseCycleDuration > 0) {
+      for (let rep = 0; rep < loopCount; rep++) {
+        for (const r of adTimeRanges) {
+          expandedAdRanges.push({
+            start: r.start + rep * baseCycleDuration,
+            end:   r.end   + rep * baseCycleDuration,
+          });
+        }
+      }
+      this.log(session, `Overlay suppression: ${adTimeRanges.length} tanda(s) × ${loopCount} ciclos = ${expandedAdRanges.length} ventanas sin overlays`);
+    }
+
     // 5. Overlays
     const overlays = await this.overlaysService.getEnabledForChannel(session.channelId);
     const fontsOk   = await this.checkFontsAvailable();
@@ -690,7 +720,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     }
 
     const overlayFilter = (overlays.length > 0 && !session.overlaysDisabled && fontsOk)
-      ? await this.buildOverlayFilter(session, overlays, scale)
+      ? await this.buildOverlayFilter(session, overlays, scale, expandedAdRanges)
       : null;
 
     this.log(session, overlayFilter
@@ -1247,7 +1277,12 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     session: PlayoutSession,
     overlays: Overlay[],
     scale: string,
+    adTimeRanges: { start: number; end: number }[] = [],
   ): Promise<{ filterComplex: string; extraInputArgs: string[]; videoMapLabel: string } | null> {
+    // Construir expresión enable: "1" (siempre) o "not(between(t,s1,e1)+...)" (fuera de tandas)
+    const enableExpr = adTimeRanges.length > 0
+      ? `not(${adTimeRanges.map(r => `between(t,${r.start.toFixed(2)},${r.end.toFixed(2)})`).join('+')})`
+      : null;
     const enabled = [...overlays]
       .filter(o => o.enabled)
       .sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0));
@@ -1271,6 +1306,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         }
       }
     }
+
+    // Helper: añade :enable='<expr>' al final de una cadena de filtro FFmpeg
+    const withEnable = (filter: string) =>
+      enableExpr ? `${filter}:enable='${enableExpr}'` : filter;
 
     const filterParts: string[] = [];
     const extraInputPaths: string[] = [];
@@ -1300,24 +1339,24 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         // Construir pipeline de pre-procesado del logo (scale + opacidad)
         if (cfg.width && opacity < 1) {
           filterParts.push(`[${inputIdx}:v]scale=${cfg.width}:-1,format=rgba,colorchannelmixer=aa=${opacity.toFixed(2)}[${sl}]`);
-          filterParts.push(`[${currentStream}][${sl}]overlay=${pos}:eof_action=repeat[${nextStream}]`);
+          filterParts.push(withEnable(`[${currentStream}][${sl}]overlay=${pos}:eof_action=repeat`) + `[${nextStream}]`);
         } else if (cfg.width) {
           filterParts.push(`[${inputIdx}:v]scale=${cfg.width}:-1[${sl}]`);
-          filterParts.push(`[${currentStream}][${sl}]overlay=${pos}:eof_action=repeat[${nextStream}]`);
+          filterParts.push(withEnable(`[${currentStream}][${sl}]overlay=${pos}:eof_action=repeat`) + `[${nextStream}]`);
         } else if (opacity < 1) {
           filterParts.push(`[${inputIdx}:v]format=rgba,colorchannelmixer=aa=${opacity.toFixed(2)}[${sl}]`);
-          filterParts.push(`[${currentStream}][${sl}]overlay=${pos}:eof_action=repeat[${nextStream}]`);
+          filterParts.push(withEnable(`[${currentStream}][${sl}]overlay=${pos}:eof_action=repeat`) + `[${nextStream}]`);
         } else {
-          filterParts.push(`[${currentStream}][${inputIdx}:v]overlay=${pos}:eof_action=repeat[${nextStream}]`);
+          filterParts.push(withEnable(`[${currentStream}][${inputIdx}:v]overlay=${pos}:eof_action=repeat`) + `[${nextStream}]`);
         }
 
       } else if (ov.type === OverlayType.TEXT_STATIC) {
         const text = this.escapeText(cfg.text ?? '');
         const font = cfg.bold ? FONT_BOLD : FONT;
         const box  = `:box=1:boxcolor=${cfg.bgColor ?? 'black@0.5'}:boxborderw=8`;
-        filterParts.push(
-          `[${currentStream}]drawtext=fontfile=${font}:text=${text}:fontsize=${cfg.fontSize ?? 24}:fontcolor=${cfg.fontColor ?? 'white'}:${this.textXY(cfg)}${box}:fix_bounds=1[${nextStream}]`,
-        );
+        filterParts.push(withEnable(
+          `[${currentStream}]drawtext=fontfile=${font}:text=${text}:fontsize=${cfg.fontSize ?? 24}:fontcolor=${cfg.fontColor ?? 'white'}:${this.textXY(cfg)}${box}:fix_bounds=1`,
+        ) + `[${nextStream}]`);
 
       } else if (ov.type === OverlayType.CLOCK) {
         // expansion=strftime: drawtext evalúa la cadena como strftime() usando el TZ
@@ -1332,9 +1371,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
             ? '%T'
             : '%R'; // default: time_short
         const box = `:box=1:boxcolor=${cfg.bgColor ?? 'black@0.6'}:boxborderw=10`;
-        filterParts.push(
-          `[${currentStream}]drawtext=fontfile=${FONT_BOLD}:text=${fmt}:expansion=strftime:fontsize=${cfg.fontSize ?? 28}:fontcolor=${cfg.fontColor ?? 'white'}:${this.textXY(cfg)}${box}:fix_bounds=1[${nextStream}]`,
-        );
+        filterParts.push(withEnable(
+          `[${currentStream}]drawtext=fontfile=${FONT_BOLD}:text=${fmt}:expansion=strftime:fontsize=${cfg.fontSize ?? 28}:fontcolor=${cfg.fontColor ?? 'white'}:${this.textXY(cfg)}${box}:fix_bounds=1`,
+        ) + `[${nextStream}]`);
 
       } else if (ov.type === OverlayType.TEXT_SCROLL || ov.type === OverlayType.TICKER) {
         const text    = this.escapeText(cfg.text ?? '');
@@ -1346,12 +1385,12 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         // mod(...) garantiza que reinicia el ciclo al llegar al extremo izquierdo
         const scrollX = `W-mod(t*${cfg.speed ?? 80}\\,W+text_w)`;
         const barLabel = `bar${idx}`;
-        filterParts.push(
-          `[${currentStream}]drawbox=x=0:y=${barY}:w=W:h=${barH}:color=${cfg.bgColor ?? 'black@0.7'}:t=fill[${barLabel}]`,
-        );
-        filterParts.push(
-          `[${barLabel}]drawtext=fontfile=${FONT}:text=${text}:fontsize=${cfg.fontSize ?? 20}:fontcolor=${cfg.fontColor ?? 'white'}:x=${scrollX}:y=${textY}:fix_bounds=1[${nextStream}]`,
-        );
+        filterParts.push(withEnable(
+          `[${currentStream}]drawbox=x=0:y=${barY}:w=W:h=${barH}:color=${cfg.bgColor ?? 'black@0.7'}:t=fill`,
+        ) + `[${barLabel}]`);
+        filterParts.push(withEnable(
+          `[${barLabel}]drawtext=fontfile=${FONT}:text=${text}:fontsize=${cfg.fontSize ?? 20}:fontcolor=${cfg.fontColor ?? 'white'}:x=${scrollX}:y=${textY}:fix_bounds=1`,
+        ) + `[${nextStream}]`);
 
       } else if (ov.type === OverlayType.TEMPERATURE) {
         // TEMPERATURE: lee la temperatura desde un archivo temporal actualizado periódicamente.
@@ -1359,9 +1398,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         // El archivo es escrito por writeTempFile() antes de arrancar y por startTempRefresh() cada 10 min.
         const tempFile = `/tmp/cloudtv-wtemp-${session.channelId}-${ov.id}.txt`;
         const box      = `:box=1:boxcolor=${cfg.bgColor ?? 'black@0.6'}:boxborderw=10`;
-        filterParts.push(
-          `[${currentStream}]drawtext=fontfile=${FONT_BOLD}:textfile=${tempFile}:reload=1:fontsize=${cfg.fontSize ?? 28}:fontcolor=${cfg.fontColor ?? 'white'}:${this.textXY(cfg)}${box}:fix_bounds=1[${nextStream}]`,
-        );
+        filterParts.push(withEnable(
+          `[${currentStream}]drawtext=fontfile=${FONT_BOLD}:textfile=${tempFile}:reload=1:fontsize=${cfg.fontSize ?? 28}:fontcolor=${cfg.fontColor ?? 'white'}:${this.textXY(cfg)}${box}:fix_bounds=1`,
+        ) + `[${nextStream}]`);
 
       } else {
         continue;

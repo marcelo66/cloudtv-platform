@@ -24,6 +24,7 @@ export interface AdBlock {
   description?: string;
   rotationMode: RotationMode;
   isActive: boolean;
+  suppressOverlays: boolean;
   createdAt: string;
   spots: AdSpot[];
   _count?: { spots: number; cuePoints: number; impressions: number };
@@ -40,6 +41,7 @@ export interface UpdateAdBlockInput {
   description?: string;
   rotationMode?: RotationMode;
   isActive?: boolean;
+  suppressOverlays?: boolean;
 }
 
 export interface CreateAdSpotInput {
