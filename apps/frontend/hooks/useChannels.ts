@@ -14,6 +14,7 @@ export interface Channel {
   videoQuality: '480p' | '720p' | '1080p';
   adIntervalMinutes?: number | null;
   adIntervalBlockId?: string | null;
+  fillerPlaylistId?: string | null;
   createdAt: string;
   updatedAt: string;
   _count?: { videos: number; playlists: number };
@@ -48,7 +49,7 @@ export function useChannel(id: string | null) {
 export function useUpdateChannel() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, data }: { id: string; data: { name?: string; description?: string; videoQuality?: string; adIntervalMinutes?: number | null; adIntervalBlockId?: string | null } }) =>
+    mutationFn: ({ id, data }: { id: string; data: { name?: string; description?: string; videoQuality?: string; adIntervalMinutes?: number | null; adIntervalBlockId?: string | null; fillerPlaylistId?: string | null } }) =>
       apiClient.patch(`/channels/${id}`, data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['channels'] });

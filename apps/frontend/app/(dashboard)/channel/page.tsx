@@ -36,6 +36,7 @@ import {
 } from '@/hooks/useChannels';
 import { useSchedules } from '@/hooks/useSchedules';
 import { useAdBlocks } from '@/hooks/useAdBlocks';
+import { usePlaylists } from '@/hooks/usePlaylists';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 
@@ -161,6 +162,8 @@ export default function ChannelPage() {
   const [adIntervalEnabled, setAdIntervalEnabled] = useState(false);
   const [adIntervalMinutes, setAdIntervalMinutes] = useState(30);
   const [adIntervalBlockId, setAdIntervalBlockId] = useState('');
+  // Relleno de programación
+  const [fillerPlaylistId, setFillerPlaylistId] = useState('');
 
   // Auto-select first channel
   useEffect(() => {
@@ -171,6 +174,7 @@ export default function ChannelPage() {
 
   const { data: channel, isLoading: loadingChannel } = useChannel(selectedId);
   const { data: adBlocks = [] } = useAdBlocks(selectedId);
+  const { data: channelPlaylists = [] } = usePlaylists(selectedId);
 
   // Sync edit fields
   useEffect(() => {
@@ -180,6 +184,7 @@ export default function ChannelPage() {
       setAdIntervalEnabled(!!channel.adIntervalMinutes);
       setAdIntervalMinutes(channel.adIntervalMinutes ?? 30);
       setAdIntervalBlockId(channel.adIntervalBlockId ?? '');
+      setFillerPlaylistId(channel.fillerPlaylistId ?? '');
     }
   }, [channel?.id]);
 
@@ -211,6 +216,14 @@ export default function ChannelPage() {
   const handleQualityChange = (q: string) => {
     if (!selectedId || q === channel?.videoQuality) return;
     update.mutate({ id: selectedId, data: { videoQuality: q } });
+  };
+
+  const handleSaveFillerPlaylist = () => {
+    if (!selectedId) return;
+    update.mutate(
+      { id: selectedId, data: { fillerPlaylistId: fillerPlaylistId || null } },
+      { onSuccess: () => toast.success(fillerPlaylistId ? 'Playlist de relleno guardada' : 'Relleno desactivado') },
+    );
   };
 
   const handleSaveAdInterval = () => {
@@ -854,6 +867,38 @@ export default function ChannelPage() {
                   </button>
                 </div>
               )}
+            </div>
+
+            {/* Relleno de programación */}
+            <div className="glass-card p-5 space-y-4">
+              <div className="flex items-center gap-2 mb-1">
+                <Clapperboard className="w-4 h-4 text-slate-400" />
+                <h3 className="text-sm font-semibold text-slate-200">Relleno de programación</h3>
+              </div>
+              <p className="text-xs text-slate-500">
+                Playlist que se emite cuando no hay programación activa en el scheduler,
+                o para completar el tiempo de un slot cuando el contenido es más corto que su duración.
+              </p>
+              <select
+                value={fillerPlaylistId}
+                onChange={(e) => setFillerPlaylistId(e.target.value)}
+                className="w-full px-3 py-2 rounded-lg text-sm bg-surface-700 border border-white/10 text-white focus:outline-none focus:ring-1 focus:ring-brand-500/50 focus:border-brand-500 transition-colors"
+              >
+                <option value="">— Sin relleno —</option>
+                {channelPlaylists.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+              <div className="flex justify-end">
+                <button
+                  onClick={handleSaveFillerPlaylist}
+                  disabled={update.isPending || fillerPlaylistId === (channel?.fillerPlaylistId ?? '')}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium bg-brand-600 hover:bg-brand-500 text-white transition-colors disabled:opacity-50"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  Guardar relleno
+                </button>
+              </div>
             </div>
 
             {/* Danger zone */}

@@ -288,7 +288,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     const myPollToken = session.pollToken;
 
     // 1. Playlist activa
-    const playlist = await this.getActivePlaylist(session.channelId);
+    const { playlist, scheduleEndTime, fillerPlaylist } = await this.getActivePlaylist(session.channelId);
     if (!playlist?.items?.length) {
       this.log(session, 'ERROR: Sin playlist o sin videos READY. Abortando.');
       await this.prisma.channel.update({
@@ -670,6 +670,85 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     // 4c. Post-tanda del programa (schedule)
     if (scheduleEntry?.postAdBlock) {
       await insertBlock(scheduleEntry.postAdBlock, 'POST_ROLL');
+    }
+
+    // ── 4d. Relleno de slot ───────────────────────────────────────────────────────
+    //
+    // Si el contenido del programa es más corto que la duración del slot del schedule,
+    // se descargan videos de la fillerPlaylist (configurada en el schedule o en el canal)
+    // y se agregan al concat hasta cubrir el tiempo restante del slot.
+    // Esto evita que el programa loopee y produce un ciclo limpio [programa + relleno].
+    const gapSeconds = scheduleEndTime
+      ? Math.max(0, (scheduleEndTime.getTime() - Date.now()) / 1000 - totalDuration)
+      : 0;
+
+    if (gapSeconds > 30 && fillerPlaylist && fillerPlaylist.items.length > 0) {
+      this.log(session, `Relleno: gap de ${(gapSeconds / 60).toFixed(1)}min → "${fillerPlaylist.name}"`);
+
+      type FillerEntry = { localPath: string; duration: number; isNorm: boolean };
+      const fillerEntries: FillerEntry[] = [];
+
+      for (const item of fillerPlaylist.items) {
+        if (session.stopping) break;
+        const videoId   = item.video.id;
+        const dur       = item.video.duration ?? 0;
+        if (dur <= 0) continue;
+
+        const normPath  = path.join(normCacheDir, `norm_${qKeyEarly}_${videoId}.mp4`);
+        const rawPath   = path.join(videosDir,    `raw_${videoId}.mp4`);
+        const normKeyDb: string | null | undefined =
+          qKeyEarly === '480p'  ? item.video.norm480pKey  :
+          qKeyEarly === '720p'  ? item.video.norm720pKey  :
+          qKeyEarly === '1080p' ? item.video.norm1080pKey : null;
+
+        // 1. Caché norm en disco
+        let normExists = false;
+        try { await fs.access(normPath); normExists = true; } catch { /* no existe */ }
+        if (normExists) { fillerEntries.push({ localPath: normPath, duration: dur, isNorm: true }); continue; }
+
+        // 2. Pre-normalizado en S3
+        if (normKeyDb) {
+          try {
+            await this.storage.downloadToFile(normKeyDb, normPath);
+            fillerEntries.push({ localPath: normPath, duration: dur, isNorm: true });
+            this.log(session, `  ✓ [filler-prenorm] ${videoId}`);
+            continue;
+          } catch { /* fallback a raw */ }
+        }
+
+        // 3. Raw
+        const rawKey = item.video.processedKey ?? item.video.originalKey;
+        if (!rawKey) continue;
+        let rawExists = false;
+        try { await fs.access(rawPath); rawExists = true; } catch { /* no existe */ }
+        if (!rawExists) {
+          try {
+            await this.storage.downloadToFile(rawKey, rawPath);
+            await this.ensureFaststart(rawPath).catch(() => {});
+          } catch { continue; }
+        }
+        fillerEntries.push({ localPath: rawPath, duration: dur, isNorm: false });
+        this.log(session, `  ✓ [filler-raw] ${videoId}`);
+      }
+
+      if (fillerEntries.length > 0) {
+        let filled = 0;
+        let passes = 0;
+        while (filled < gapSeconds - 1 && passes < 200) {
+          for (const f of fillerEntries) {
+            if (filled >= gapSeconds - 1) break;
+            concatLines.push(`file '${f.localPath}'`);
+            if (f.isNorm) concatLines.push(`duration ${f.duration.toFixed(3)}`);
+            filled            += f.duration;
+            currentConcatTime += f.duration;
+          }
+          passes++;
+        }
+        totalDuration += filled;
+        this.log(session, `  ✓ Relleno listo: ${(filled / 60).toFixed(1)}min (${fillerEntries.length} video(s))`);
+      } else {
+        this.log(session, '  WARN: Ningún video de relleno pudo descargarse');
+      }
     }
 
     // ── Expansión del concat para cobertura ~24h sin -stream_loop ────────────────
@@ -2321,6 +2400,16 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
   }
 
   // ─── Playlist activa ───────────────────────────────────────────
+  //
+  // Devuelve la playlist a emitir junto con el contexto de relleno:
+  //   · scheduleEndTime — hora de fin del slot activo (null si no hay schedule)
+  //   · fillerPlaylist  — playlist para cubrir el gap (null si no aplica)
+  //
+  // Prioridad:
+  //   1. Schedule activo (mayor priority gana) → usa su fillerPlaylist si el contenido es corto
+  //   2. Sin schedule → fillerPlaylist del canal (emite relleno continuo hasta el próximo schedule)
+  //   3. Playlist por defecto (isDefault=true) → comportamiento previo
+  //   4. Cualquier playlist del canal → fallback de último recurso
 
   private async getActivePlaylist(channelId: string) {
     const now = new Date();
@@ -2334,22 +2423,44 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       },
     } as const;
 
+    // 1. Schedule activo con mayor prioridad
     const schedule = await this.prisma.schedule.findFirst({
       where: { channelId, playlistId: { not: null }, startTime: { lte: now }, endTime: { gte: now } },
       orderBy: { priority: 'desc' },
-      include: { playlist: { include: { items: itemsArgs } } },
+      include: {
+        playlist:       { include: { items: itemsArgs } },
+        fillerPlaylist: { include: { items: itemsArgs } },
+      },
     });
-    if (schedule?.playlist?.items?.length) return schedule.playlist;
+    if (schedule?.playlist?.items?.length) {
+      return {
+        playlist:        schedule.playlist,
+        scheduleEndTime: schedule.endTime as Date,
+        fillerPlaylist:  schedule.fillerPlaylist?.items?.length ? schedule.fillerPlaylist : null,
+      };
+    }
 
+    // 2. Sin schedule activo → playlist de relleno del canal
+    const channelRow = await this.prisma.channel.findUnique({
+      where: { id: channelId },
+      include: { fillerPlaylist: { include: { items: itemsArgs } } },
+    });
+    if (channelRow?.fillerPlaylist?.items?.length) {
+      this.logger.log(`[${channelId}] Sin schedule → emitiendo playlist de relleno del canal`);
+      return { playlist: channelRow.fillerPlaylist, scheduleEndTime: null, fillerPlaylist: null };
+    }
+
+    // 3 & 4. Fallback al comportamiento previo
     const def = await this.prisma.playlist.findFirst({
       where: { channelId, isDefault: true },
       include: { items: itemsArgs },
     });
-    if (def?.items?.length) return def;
+    if (def?.items?.length) return { playlist: def, scheduleEndTime: null, fillerPlaylist: null };
 
-    return this.prisma.playlist.findFirst({
+    const any = await this.prisma.playlist.findFirst({
       where: { channelId },
       include: { items: itemsArgs },
     });
+    return { playlist: any ?? null, scheduleEndTime: null, fillerPlaylist: null };
   }
 }

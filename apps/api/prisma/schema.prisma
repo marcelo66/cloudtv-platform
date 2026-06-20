@@ -78,6 +78,9 @@ model Channel {
   adIntervalMinutes Int?          @map("ad_interval_minutes")
   adIntervalBlockId String?       @map("ad_interval_block_id")
   adIntervalBlock   AdBlock?      @relation("ChannelAdInterval", fields: [adIntervalBlockId], references: [id])
+  // Playlist de relleno: se usa cuando no hay schedule activo o para cubrir gaps de programación
+  fillerPlaylistId  String?       @map("filler_playlist_id")
+  fillerPlaylist    Playlist?     @relation("ChannelFiller", fields: [fillerPlaylistId], references: [id])
   createdAt         DateTime      @default(now()) @map("created_at")
   updatedAt         DateTime      @updatedAt @map("updated_at")
 
@@ -147,8 +150,10 @@ model Playlist {
   createdAt     DateTime       @default(now()) @map("created_at")
   updatedAt     DateTime       @updatedAt @map("updated_at")
 
-  items     PlaylistItem[]
-  schedules Schedule[]
+  items          PlaylistItem[]
+  schedules      Schedule[]
+  channelFillers Channel[]  @relation("ChannelFiller")
+  scheduleFills  Schedule[] @relation("ScheduleFiller")
 
   @@map("playlists")
 }
@@ -186,6 +191,9 @@ model Schedule {
   postAdBlockId String?    @map("post_ad_block_id")
   preAdBlock    AdBlock?   @relation("SchedulePreAd",  fields: [preAdBlockId],  references: [id])
   postAdBlock   AdBlock?   @relation("SchedulePostAd", fields: [postAdBlockId], references: [id])
+  // Playlist de relleno: si el contenido del slot es más corto que su duración, completa con esta playlist
+  fillerPlaylistId  String?    @map("filler_playlist_id")
+  fillerPlaylist    Playlist?  @relation("ScheduleFiller", fields: [fillerPlaylistId], references: [id])
   createdAt     DateTime   @default(now()) @map("created_at")
 
   @@map("schedules")

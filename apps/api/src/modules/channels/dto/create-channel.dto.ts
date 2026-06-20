@@ -64,4 +64,9 @@ export class UpdateChannelDto {
   @IsOptional()
   @IsString()
   adIntervalBlockId?: string | null;
+
+  @ApiPropertyOptional({ description: 'ID de la playlist de relleno (se emite cuando no hay schedule activo o para completar slots cortos)' })
+  @IsOptional()
+  @IsString()
+  fillerPlaylistId?: string | null;
 }

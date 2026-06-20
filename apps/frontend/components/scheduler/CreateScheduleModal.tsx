@@ -76,8 +76,9 @@ export function CreateScheduleModal({ channelId, initialStart, schedule, onClose
   type Recurrence = 'ONCE' | 'DAILY' | 'WEEKLY' | 'WEEKDAYS' | 'WEEKENDS';
   const [recurrence,   setRecurrence]   = useState<Recurrence>((schedule?.recurrence as Recurrence) ?? 'ONCE');
   const [priority,     setPriority]     = useState(schedule?.priority ?? 0);
-  const [preAdBlockId, setPreAdBlockId] = useState(schedule?.preAdBlockId ?? '');
-  const [postAdBlockId,setPostAdBlockId]= useState(schedule?.postAdBlockId ?? '');
+  const [preAdBlockId,     setPreAdBlockId]     = useState(schedule?.preAdBlockId ?? '');
+  const [postAdBlockId,    setPostAdBlockId]    = useState(schedule?.postAdBlockId ?? '');
+  const [fillerPlaylistId, setFillerPlaylistId] = useState(schedule?.fillerPlaylistId ?? '');
 
   // ── Duración del bloque ──────────────────────────────────────────────────────
   const slotSec = useMemo(() => slotSeconds(startTime, endTime), [startTime, endTime]);
@@ -94,7 +95,7 @@ export function CreateScheduleModal({ channelId, initialStart, schedule, onClose
     if (Math.abs(diff) < 60)
       return { color: 'text-green-400', bg: 'bg-green-500/10 border-green-500/20', icon: '✓', text: 'Encaja perfectamente con el bloque' };
     if (diff < 0)
-      return { color: 'text-amber-400', bg: 'bg-amber-500/10 border-amber-500/20', icon: '↺', text: `${formatDur(-diff)} más corta que el bloque — se repetirá en loop` };
+      return { color: 'text-amber-400', bg: 'bg-amber-500/10 border-amber-500/20', icon: '↺', text: `${formatDur(-diff)} más corta que el bloque — se completará con relleno si está configurado` };
     return { color: 'text-orange-400', bg: 'bg-orange-500/10 border-orange-500/20', icon: '✂', text: `${formatDur(diff)} más larga que el bloque — se cortará al finalizar` };
   }, [plDuration, slotSec, slotValid]);
 
@@ -112,8 +113,9 @@ export function CreateScheduleModal({ channelId, initialStart, schedule, onClose
       endTime:       new Date(endTime).toISOString(),
       recurrence,
       priority,
-      preAdBlockId:  preAdBlockId  || undefined,
-      postAdBlockId: postAdBlockId || undefined,
+      preAdBlockId:     preAdBlockId     || undefined,
+      postAdBlockId:    postAdBlockId    || undefined,
+      fillerPlaylistId: fillerPlaylistId || undefined,
     };
 
     if (isEdit) {
@@ -312,6 +314,30 @@ export function CreateScheduleModal({ channelId, initialStart, schedule, onClose
               <p className="text-[10px] text-slate-600 leading-relaxed">
                 La tanda al inicio se emite justo antes de que arranque el programa.
                 La del final, inmediatamente después.
+              </p>
+            </div>
+          )}
+
+          {/* Playlist de relleno */}
+          {playlists.length > 0 && (
+            <div className="rounded-lg border border-white/5 bg-white/[0.02] p-3 space-y-2">
+              <div className="flex items-center gap-2">
+                <Clapperboard className="w-3.5 h-3.5 text-slate-500" />
+                <span className="text-xs font-medium text-slate-400">Relleno de slot</span>
+              </div>
+              <select
+                value={fillerPlaylistId}
+                onChange={(e) => setFillerPlaylistId(e.target.value)}
+                className={inputClass}
+              >
+                <option value="">— Sin relleno —</option>
+                {playlists.filter(p => p.id !== playlistId).map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+              <p className="text-[10px] text-slate-600 leading-relaxed">
+                Si el contenido del slot es más corto que su duración, el tiempo restante
+                se completa con videos de esta playlist en lugar de repetir el programa.
               </p>
             </div>
           )}

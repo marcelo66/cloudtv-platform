@@ -39,4 +39,9 @@ export class CreateScheduleDto {
   @IsString()
   @IsOptional()
   postAdBlockId?: string;
+
+  /** ID de la playlist de relleno para cubrir el tiempo restante si el contenido es más corto que el slot */
+  @IsString()
+  @IsOptional()
+  fillerPlaylistId?: string;
 }

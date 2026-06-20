@@ -26,9 +26,10 @@ export class SchedulesService {
 
   /** Include para todas las queries de Schedule */
   private readonly scheduleInclude = {
-    playlist:    { select: { id: true, name: true } },
-    preAdBlock:  { select: { id: true, name: true } },
-    postAdBlock: { select: { id: true, name: true } },
+    playlist:       { select: { id: true, name: true } },
+    fillerPlaylist: { select: { id: true, name: true } },
+    preAdBlock:     { select: { id: true, name: true } },
+    postAdBlock:    { select: { id: true, name: true } },
   } as const;
 
   async create(dto: CreateScheduleDto, userId: string) {
@@ -47,8 +48,9 @@ export class SchedulesService {
         endTime:      end,
         recurrence:   dto.recurrence ?? 'ONCE',
         priority:     dto.priority ?? 0,
-        preAdBlockId:  dto.preAdBlockId,
-        postAdBlockId: dto.postAdBlockId,
+        preAdBlockId:    dto.preAdBlockId,
+        postAdBlockId:   dto.postAdBlockId,
+        fillerPlaylistId: dto.fillerPlaylistId,
       },
       include: this.scheduleInclude,
     });
