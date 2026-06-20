@@ -209,6 +209,7 @@ export class VideosService {
         mimeType: true,
         tags: true,
         folder: true,
+        processingProgress: true,
         createdAt: true,
         updatedAt: true,
       },

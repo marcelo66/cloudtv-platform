@@ -120,8 +120,9 @@ model Video {
   bitrate       Int?
   fileSize      BigInt      @map("file_size")
   mimeType      String      @map("mime_type")
-  tags          String[]    @default([])
-  folder        String?     // Carpeta organizativa (solo filtrado en frontend)
+  tags               String[]    @default([])
+  folder             String?     // Carpeta organizativa (solo filtrado en frontend)
+  processingProgress Int?        @map("processing_progress") // 0-100, null cuando no está procesando
   createdAt     DateTime    @default(now()) @map("created_at")
   updatedAt     DateTime    @updatedAt @map("updated_at")
 

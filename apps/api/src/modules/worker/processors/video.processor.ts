@@ -50,15 +50,24 @@ export class VideoProcessor extends WorkerHost {
 
     this.logger.log(`Re-normalizing video ${videoId} (job ${job.id})`);
 
+    // Progreso throttled → BD (cada 5%)
+    let lastDbPct = -1;
+    const saveProgress = (pct: number) => {
+      if (pct - lastDbPct >= 5) {
+        lastDbPct = pct;
+        this.prisma.video.update({ where: { id: videoId }, data: { processingProgress: pct } }).catch(() => {});
+      }
+    };
+
     try {
       await fs.mkdir(tmpDir, { recursive: true });
       const ext = path.extname(originalKey) || '.mp4';
       const inputPath = path.join(tmpDir, `input${ext}`);
 
-      await job.updateProgress(5);
+      await job.updateProgress(5); saveProgress(5);
       this.logger.debug(`Downloading original ${originalKey}`);
       await this.storage.downloadToFile(originalKey, inputPath);
-      await job.updateProgress(20);
+      await job.updateProgress(20); saveProgress(20);
 
       // Obtener duración del video para reportar progreso real
       const reNormMeta = await this.ffprobe.getMetadata(inputPath).catch(() => null);
@@ -78,17 +87,18 @@ export class VideoProcessor extends WorkerHost {
           (ffmpegPct) => {
             const globalPct = Math.round(qStart + (ffmpegPct / 100) * (qEnd - qStart));
             job.updateProgress(globalPct).catch(() => {});
+            saveProgress(globalPct);
           },
         );
 
-        await job.updateProgress(qEnd);
+        await job.updateProgress(qEnd); saveProgress(qEnd);
 
         const normKey = this.storage.buildNormKey(channelId, videoId, q);
         await this.storage.putObject(normKey, createReadStream(normPath), 'video/mp4');
         normKeyMap[q] = normKey;
 
         await fs.rm(normPath).catch(() => {});
-        await job.updateProgress(qStart + 23);
+        await job.updateProgress(qStart + 23); saveProgress(qStart + 23);
         this.logger.log(`✓ renorm_${q}: ${normKey}`);
       }
 
@@ -99,6 +109,7 @@ export class VideoProcessor extends WorkerHost {
           norm720pKey:  normKeyMap['720p'],
           norm1080pKey: normKeyMap['1080p'],
           processedKey: normKeyMap['720p'],
+          processingProgress: null,
         },
       });
 
@@ -106,6 +117,7 @@ export class VideoProcessor extends WorkerHost {
       this.logger.log(`✓ Re-normalization complete for video ${videoId}`);
     } catch (error) {
       this.logger.error(`✗ Re-normalization failed for ${videoId}: ${error.message}`, error.stack);
+      this.prisma.video.update({ where: { id: videoId }, data: { processingProgress: null } }).catch(() => {});
       throw error;
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
@@ -122,6 +134,15 @@ export class VideoProcessor extends WorkerHost {
 
     this.logger.log(`Processing video ${videoId} (job ${job.id})`);
 
+    // Progreso throttled → BD (cada 5%)
+    let lastDbPct = -1;
+    const saveProgress = (pct: number) => {
+      if (pct - lastDbPct >= 5) {
+        lastDbPct = pct;
+        this.prisma.video.update({ where: { id: videoId }, data: { processingProgress: pct } }).catch(() => {});
+      }
+    };
+
     try {
       // ─── 1. Preparar directorio temporal ─────────────────────
       await fs.mkdir(tmpDir, { recursive: true });
@@ -129,12 +150,12 @@ export class VideoProcessor extends WorkerHost {
       const inputPath = path.join(tmpDir, `input${ext}`);
       const thumbPath = path.join(tmpDir, 'thumbnail.jpg');
 
-      await job.updateProgress(5);
+      await job.updateProgress(5); saveProgress(5);
 
       // ─── 2. Descargar archivo original de S3 ─────────────────
       this.logger.debug(`Downloading ${originalKey}`);
       await this.storage.downloadToFile(originalKey, inputPath);
-      await job.updateProgress(20);
+      await job.updateProgress(20); saveProgress(20);
 
       // ─── 3. Extraer metadata con FFprobe ─────────────────────
       this.logger.debug(`Running ffprobe on ${path.basename(inputPath)}`);
@@ -142,7 +163,7 @@ export class VideoProcessor extends WorkerHost {
       this.logger.log(
         `Metadata: ${metadata.width}x${metadata.height} ${metadata.fps}fps ${metadata.codec} ${metadata.duration}s`,
       );
-      await job.updateProgress(35);
+      await job.updateProgress(35); saveProgress(35);
 
       // ─── 4. Guardar metadata en BD ───────────────────────────
       await this.prisma.video.update({
@@ -156,7 +177,7 @@ export class VideoProcessor extends WorkerHost {
           bitrate: metadata.bitrate,
         },
       });
-      await job.updateProgress(40);
+      await job.updateProgress(40); saveProgress(40);
 
       // ─── 5. Generar thumbnail ─────────────────────────────────
       const seekAt = Math.min(5, metadata.duration * 0.1);
@@ -176,7 +197,7 @@ export class VideoProcessor extends WorkerHost {
         data: { thumbnailUrl },
       });
 
-      await job.updateProgress(65);
+      await job.updateProgress(65); saveProgress(65);
       this.logger.log(`Thumbnail uploaded: ${thumbnailKey}`);
 
       // ─── 6. Normalizar a formato broadcast canónico (Opción B) ──────────────
@@ -205,10 +226,11 @@ export class VideoProcessor extends WorkerHost {
           (ffmpegPct) => {
             const globalPct = Math.round(qStart + (ffmpegPct / 100) * (qEnd - qStart));
             job.updateProgress(globalPct).catch(() => {});
+            saveProgress(globalPct);
           },
         );
 
-        await job.updateProgress(qEnd);
+        await job.updateProgress(qEnd); saveProgress(qEnd);
 
         const normKey = this.storage.buildNormKey(channelId, videoId, q);
         await this.storage.putObject(normKey, createReadStream(normPath), 'video/mp4');
@@ -217,7 +239,7 @@ export class VideoProcessor extends WorkerHost {
         // Liberar espacio en disco inmediatamente
         await fs.rm(normPath).catch(() => {});
 
-        await job.updateProgress(qStart + RANGE_PER_Q);
+        await job.updateProgress(qStart + RANGE_PER_Q); saveProgress(qStart + RANGE_PER_Q);
         this.logger.log(`✓ norm_${q} subido a S3: ${normKey}`);
       }
 
@@ -232,12 +254,12 @@ export class VideoProcessor extends WorkerHost {
         },
       });
 
-      await job.updateProgress(95);
+      await job.updateProgress(95); saveProgress(95);
 
       // ─── 7. Marcar como READY ─────────────────────────────────
       await this.prisma.video.update({
         where: { id: videoId },
-        data: { status: 'READY' },
+        data: { status: 'READY', processingProgress: null },
       });
 
       await job.updateProgress(100);
@@ -250,7 +272,7 @@ export class VideoProcessor extends WorkerHost {
 
       await this.prisma.video.update({
         where: { id: videoId },
-        data: { status: 'ERROR' },
+        data: { status: 'ERROR', processingProgress: null },
       });
 
       throw error; // BullMQ reintentará según la config del job

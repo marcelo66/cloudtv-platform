@@ -107,8 +107,18 @@ export function VideoCard({ video, folders = [], onUpdate, onDelete }: VideoCard
 
         {/* Processing overlay */}
         {isProcessing && (
-          <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
-            <VideoStatusBadge status={video.status} />
+          <div className="absolute inset-0 bg-black/50 flex flex-col items-center justify-center gap-2">
+            <VideoStatusBadge status={video.status} progress={video.processingProgress} />
+            {video.status === 'PROCESSING' &&
+              video.processingProgress != null &&
+              video.processingProgress > 0 && (
+                <div className="w-3/4 h-1 bg-white/20 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-yellow-400 transition-all duration-500 ease-out rounded-full"
+                    style={{ width: `${video.processingProgress}%` }}
+                  />
+                </div>
+              )}
           </div>
         )}
       </div>
@@ -251,7 +261,7 @@ export function VideoCard({ video, folders = [], onUpdate, onDelete }: VideoCard
 
         {/* Meta row */}
         <div className="flex items-center justify-between">
-          <VideoStatusBadge status={video.status} />
+          <VideoStatusBadge status={video.status} progress={video.processingProgress} />
           <div className="flex items-center gap-2 text-xs text-slate-600">
             {video.width && video.height && <span>{video.height}p</span>}
             <span>{formatBytes(Number(video.fileSize))}</span>

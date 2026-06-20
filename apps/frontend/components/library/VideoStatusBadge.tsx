@@ -35,8 +35,19 @@ const config: Record<
   },
 };
 
-export function VideoStatusBadge({ status }: { status: VideoStatus }) {
+export function VideoStatusBadge({
+  status,
+  progress,
+}: {
+  status: VideoStatus;
+  progress?: number | null;
+}) {
   const { label, className, icon: Icon, spin } = config[status] ?? config.PENDING;
+
+  const displayLabel =
+    status === 'PROCESSING' && progress != null && progress > 0
+      ? `Procesando · ${progress}%`
+      : label;
 
   return (
     <span
@@ -46,7 +57,7 @@ export function VideoStatusBadge({ status }: { status: VideoStatus }) {
       )}
     >
       <Icon className={cn('w-3 h-3', spin && 'animate-spin')} />
-      {label}
+      {displayLabel}
     </span>
   );
 }

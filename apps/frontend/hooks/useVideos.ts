@@ -18,6 +18,7 @@ export interface Video {
   mimeType: string;
   tags: string[];
   folder?: string | null;
+  processingProgress?: number | null;
   createdAt: string;
   updatedAt: string;
 }
