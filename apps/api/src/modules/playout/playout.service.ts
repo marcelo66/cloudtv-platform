@@ -328,6 +328,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     await fs.mkdir(videosDir, { recursive: true });
 
     const downloadedMap  = new Map<number, string>();
+    const normalizedSet  = new Set<number>(); // índices con norm file completo (no raw)
     const pendingNorm: Array<{ rawPath: string; normPath: string }> = [];
     let totalDuration = 0;
 
@@ -363,6 +364,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       if (normExists) {
         this.log(session, `  ✓ [cache] ${i + 1}/${playlist.items.length} · ${dur.toFixed(1)}s`);
         downloadedMap.set(i, normPath);
+        normalizedSet.add(i);
         totalDuration += dur;
         continue;
       }
@@ -407,6 +409,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           }
           downloadedMap.set(task.i, task.destPath);
           if (task.type === 'raw') pendingNorm.push({ rawPath: task.rawPath, normPath: task.normPath });
+          else normalizedSet.add(task.i);
           totalDuration += task.duration;
           this.log(session, `  ✓ [${task.type}] ${label} · ${task.duration.toFixed(1)}s`);
         } catch (err: any) {
@@ -629,7 +632,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         concatLines.push(`file '${mp4Path}'`);
         if (item.trimStart) concatLines.push(`inpoint ${item.trimStart}`);
         if (item.trimEnd)   concatLines.push(`outpoint ${item.trimEnd}`);
-        concatLines.push(`duration ${segDur.toFixed(3)}`);
+        if (normalizedSet.has(i)) concatLines.push(`duration ${segDur.toFixed(3)}`);
         currentConcatTime += segDur;
       } else {
         let inpoint: number = item.trimStart ?? 0;
@@ -639,7 +642,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           concatLines.push(`file '${mp4Path}'`);
           if (inpoint > 0) concatLines.push(`inpoint ${inpoint}`);
           concatLines.push(`outpoint ${outpoint}`);
-          concatLines.push(`duration ${segDur.toFixed(3)}`);
+          if (normalizedSet.has(i)) concatLines.push(`duration ${segDur.toFixed(3)}`);
           currentConcatTime += segDur;
           await insertBlock(cp.adBlock, 'MID_ROLL');
           inpoint = outpoint;
@@ -648,7 +651,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         concatLines.push(`file '${mp4Path}'`);
         if (inpoint > 0)   concatLines.push(`inpoint ${inpoint}`);
         if (item.trimEnd)  concatLines.push(`outpoint ${item.trimEnd}`);
-        concatLines.push(`duration ${lastSegDur.toFixed(3)}`);
+        if (normalizedSet.has(i)) concatLines.push(`duration ${lastSegDur.toFixed(3)}`);
         currentConcatTime += lastSegDur;
       }
 
@@ -1673,7 +1676,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           lastUpdateAt = Date.now();
         } else if (Date.now() - lastUpdateAt > STALL_MS && !session.scheduleChangePending) {
           // Sin segmentos nuevos → FFmpeg estancado
-          this.log(session, `WARN: FFmpeg estancado (${STALL_MS / 1000}s sin segmentos) → reiniciando con más archivos normalizados`);
+          this.log(session, `WARN: FFmpeg estancado (${STALL_MS / 1000}s sin segmentos) → reiniciando`);
           session.segmentWatchTimer = null;
           session.scheduleChangePending = true;
           const proc = session.process;
@@ -1750,10 +1753,13 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     outputPath: string,
     quality: { scale: string; vBitrate: string; maxrate: string; bufsize: string; aBitrate: string },
   ): Promise<void> {
+    // Escribir a .tmp y renombrar atómicamente al terminar.
+    // Evita que fs.access(normPath) devuelva true sobre un archivo incompleto
+    // (sin moov atom) cuando FFmpeg reinicia antes de que termine la normalización.
+    const tmpOutput = `${outputPath}.tmp`;
     const ok = await new Promise<boolean>((resolve) => {
       const proc = spawn(
-        'ffmpeg',
-        [
+        'nice', ['-n', '10', 'ffmpeg',
           '-y', '-loglevel', 'error',
           '-i', inputPath,
           // ─── Video ─────────────────────────────────────────────────────────
@@ -1764,15 +1770,15 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
             'format=yuv420p',
           ].join(','),
           '-c:v',         'libx264',
-          '-preset',      'ultrafast', // Rápido para no retrasar el arranque del canal
-          '-crf',         '22',       // Ligeramente superior al vivo (CRF 26)
+          '-preset',      'ultrafast',
+          '-crf',         '22',
           '-b:v',         quality.vBitrate,
           '-maxrate',     quality.maxrate,
           '-bufsize',     quality.bufsize,
-          '-g',           '50',       // Keyframe cada 50 frames = 2 s a 25 fps
-          '-keyint_min',  '50',       // IDR obligatorio cada 50 frames
-          '-sc_threshold','0',        // Sin keyframes extra por scene-cut
-          '-profile:v',   'high',     // H.264 High Profile (compatible HLS)
+          '-g',           '50',
+          '-keyint_min',  '50',
+          '-sc_threshold','0',
+          '-profile:v',   'high',
           '-level:v',     '4.0',
           // ─── Audio ─────────────────────────────────────────────────────────
           '-c:a',  'aac',
@@ -1782,7 +1788,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           // ─── Timestamps ────────────────────────────────────────────────────
           '-avoid_negative_ts', 'make_zero',
           '-movflags', '+faststart',
-          outputPath,
+          tmpOutput,
         ],
         { stdio: ['ignore', 'ignore', 'pipe'] },
       );
@@ -1791,8 +1797,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     });
 
     if (!ok) {
+      await fs.unlink(tmpOutput).catch(() => {});
       throw new Error(`normalizeVideoForBroadcast falló: ${path.basename(inputPath)}`);
     }
+    await fs.rename(tmpOutput, outputPath);
   }
 
   /**
@@ -1863,18 +1871,18 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     // el mismo FPS y timebase que el contenido principal para evitar saltos de DTS
     // en las transiciones spot→video. stream-copy de video conserva el FPS original
     // (24/30/60fps) lo que causa "DTS out of order" al concatenar con 25fps.
+    const tmpOutput = `${outputPath}.tmp`;
     const runFfmpeg = (extraVideoArgs: string[], extraAudioArgs: string[]) =>
       new Promise<boolean>((resolve) => {
         const proc = spawn(
-          'ffmpeg',
-          [
+          'nice', ['-n', '10', 'ffmpeg',
             '-y', '-loglevel', 'error',
             '-i', inputPath,
             ...extraVideoArgs,
             ...extraAudioArgs,
             '-avoid_negative_ts', 'make_zero',
             '-movflags', '+faststart',
-            outputPath,
+            tmpOutput,
           ],
           { stdio: ['ignore', 'ignore', 'pipe'] },
         );
@@ -1898,8 +1906,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       // para que concat demuxer encuentre un stream de audio en todos los archivos.
       const ok2 = await new Promise<boolean>((resolve) => {
         const proc = spawn(
-          'ffmpeg',
-          [
+          'nice', ['-n', '10', 'ffmpeg',
             '-y', '-loglevel', 'error',
             '-i', inputPath,
             '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
@@ -1909,7 +1916,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
             '-shortest',
             '-avoid_negative_ts', 'make_zero',
             '-movflags', '+faststart',
-            outputPath,
+            tmpOutput,
           ],
           { stdio: ['ignore', 'ignore', 'pipe'] },
         );
@@ -1918,9 +1925,12 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       });
 
       if (!ok2) {
+        await fs.unlink(tmpOutput).catch(() => {});
         throw new Error(`normalizeAdSpot falló para ${inputPath}`);
       }
     }
+
+    await fs.rename(tmpOutput, outputPath);
   }
 
   // ─── Ingest pública API ───────────────────────────────────────
