@@ -184,14 +184,26 @@ export class PlaylistsService {
   async reorderItems(playlistId: string, dto: ReorderItemsDto, userId: string) {
     await this.verifyPlaylistOwnership(playlistId, userId);
 
-    await Promise.all(
-      dto.items.map(({ id, order }) =>
-        this.prisma.playlistItem.update({
+    // @@unique([playlistId, order]) impide actualizaciones paralelas directas:
+    // el estado intermedio (p.ej. A:0→2 antes de que C salga de 2) viola la restricción.
+    // Solución: dos pasadas dentro de una transacción.
+    // Pasada 1 → valores temporales altos (sin colisión posible).
+    // Pasada 2 → valores finales definitivos.
+    await this.prisma.$transaction(async (tx) => {
+      const tempBase = dto.items.length + 10000;
+      for (let i = 0; i < dto.items.length; i++) {
+        await tx.playlistItem.update({
+          where: { id: dto.items[i].id },
+          data: { order: tempBase + i },
+        });
+      }
+      for (const { id, order } of dto.items) {
+        await tx.playlistItem.update({
           where: { id },
           data: { order },
-        }),
-      ),
-    );
+        });
+      }
+    });
 
     return this.findOne(playlistId, userId);
   }

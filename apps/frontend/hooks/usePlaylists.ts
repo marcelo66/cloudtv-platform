@@ -143,7 +143,8 @@ export function useReorderPlaylistItems() {
       playlistId: string;
       items: Array<{ id: string; order: number }>;
     }) => apiClient.patch(`/playlists/${playlistId}/items/reorder`, { items }),
-    onSuccess: (_, vars) => {
+    onSettled: (_, __, vars) => {
+      // Refrescar siempre (éxito o error) para que localItems vuelva al orden del servidor
       qc.invalidateQueries({ queryKey: ['playlist', vars.playlistId] });
       qc.invalidateQueries({ queryKey: ['playlists'] });
     },
