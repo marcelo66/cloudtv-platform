@@ -456,11 +456,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           }
         }
         session.bgNormRunning = false;
-        // Reinicio limpio: la próxima launchFfmpeg encontrará norm files en caché → Ruta B
+        // Los archivos normalizados quedan en caché para el próximo inicio del canal.
+        // NO se reinicia FFmpeg automáticamente: interrumpir el stream para ahorrar CPU
+        // no es aceptable en broadcast. El próximo inicio del canal usará stream-copy.
         if (!session.stopping && this.sessions.has(session.channelId)) {
-          this.log(session, `✓ Normalización completa (${done}/${normQueue.length}) → reiniciando con archivos optimizados…`);
-          session.scheduleChangePending = true;
-          this.killSession(session);
+          this.log(session, `✓ Normalización completa (${done}/${normQueue.length}) → listos para próximo inicio`);
         }
       })();
     } else {
@@ -585,8 +585,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       for (const spot of spots) {
         const adPath = adDownloads.get(spot.videoId);
         if (!adPath) continue;
+        const spotDur = spot.video.duration ?? 30;
         concatLines.push(`file '${adPath}'`);
-        currentConcatTime += spot.video.duration ?? 30;
+        concatLines.push(`duration ${spotDur.toFixed(3)}`);
+        currentConcatTime += spotDur;
         totalAdsInjected++;
         this.adBlocksService.recordImpression(
           spot.id, adBlock.id, session.channelId,
@@ -623,25 +625,31 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
       // Video principal (con posibles MID_ROLLs de cue points)
       if (midRolls.length === 0) {
+        const segDur = (item.trimEnd ?? videoDuration) - (item.trimStart ?? 0);
         concatLines.push(`file '${mp4Path}'`);
         if (item.trimStart) concatLines.push(`inpoint ${item.trimStart}`);
         if (item.trimEnd)   concatLines.push(`outpoint ${item.trimEnd}`);
-        currentConcatTime += (item.trimEnd ?? videoDuration) - (item.trimStart ?? 0);
+        concatLines.push(`duration ${segDur.toFixed(3)}`);
+        currentConcatTime += segDur;
       } else {
         let inpoint: number = item.trimStart ?? 0;
         for (const cp of midRolls) {
           const outpoint = cp.timeOffset!;
+          const segDur = outpoint - inpoint;
           concatLines.push(`file '${mp4Path}'`);
           if (inpoint > 0) concatLines.push(`inpoint ${inpoint}`);
           concatLines.push(`outpoint ${outpoint}`);
-          currentConcatTime += outpoint - inpoint;
+          concatLines.push(`duration ${segDur.toFixed(3)}`);
+          currentConcatTime += segDur;
           await insertBlock(cp.adBlock, 'MID_ROLL');
           inpoint = outpoint;
         }
+        const lastSegDur = (item.trimEnd ?? videoDuration) - inpoint;
         concatLines.push(`file '${mp4Path}'`);
         if (inpoint > 0)   concatLines.push(`inpoint ${inpoint}`);
         if (item.trimEnd)  concatLines.push(`outpoint ${item.trimEnd}`);
-        currentConcatTime += (item.trimEnd ?? videoDuration) - inpoint;
+        concatLines.push(`duration ${lastSegDur.toFixed(3)}`);
+        currentConcatTime += lastSegDur;
       }
 
       // POST_ROLL de cue points
@@ -1714,14 +1722,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      // ── Todos normalizados → reiniciar para activar stream-copy ───────────────────────
-      this.log(session, `[bg-norm] ✓ ${done} video(s) normalizados — reiniciando en 3s para activar stream-copy…`);
-      setTimeout(() => {
-        if (session.stopping || !this.sessions.has(session.channelId)) return;
-        session.scheduleChangePending = true;
-        const proc = session.process;
-        if (proc) { try { proc.kill('SIGTERM'); } catch { /* ok */ } }
-      }, 3_000);
+      // Los archivos normalizados quedan en caché — el próximo inicio del canal
+      // los detectará automáticamente y usará stream-copy sin re-encode.
+      this.log(session, `[bg-norm] ✓ ${done} video(s) normalizados → listos para próximo inicio del canal`);
     })().catch(() => { session.bgNormRunning = false; });
   }
 
@@ -1855,24 +1858,39 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async normalizeAdSpot(inputPath: string, outputPath: string): Promise<void> {
-    const runFfmpeg = (extraArgs: string[]) =>
+    // Re-encode completo: H.264 25fps + AAC estéreo 44100 Hz + timestamps desde 0.
+    // Crítico para DTS consistency con el concat demuxer: los spots deben tener
+    // el mismo FPS y timebase que el contenido principal para evitar saltos de DTS
+    // en las transiciones spot→video. stream-copy de video conserva el FPS original
+    // (24/30/60fps) lo que causa "DTS out of order" al concatenar con 25fps.
+    const runFfmpeg = (extraVideoArgs: string[], extraAudioArgs: string[]) =>
       new Promise<boolean>((resolve) => {
         const proc = spawn(
           'ffmpeg',
-          ['-y', '-loglevel', 'error', '-i', inputPath, ...extraArgs, outputPath],
+          [
+            '-y', '-loglevel', 'error',
+            '-i', inputPath,
+            ...extraVideoArgs,
+            ...extraAudioArgs,
+            '-avoid_negative_ts', 'make_zero',
+            '-movflags', '+faststart',
+            outputPath,
+          ],
           { stdio: ['ignore', 'ignore', 'pipe'] },
         );
         proc.on('close', (code) => resolve(code === 0));
         proc.on('error', () => resolve(false));
       });
 
-    // Intento 1: stream-copy video + re-encode audio existente a AAC estéreo 44100 Hz
-    const ok = await runFfmpeg([
-      '-c:v', 'copy',
-      '-c:a', 'aac', '-ar', '44100', '-ac', '2',
+    const videoArgs = [
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
+      '-vf', 'fps=25,format=yuv420p',
       '-map', '0:v:0',
-      '-map', '0:a:0',
-      '-movflags', '+faststart',
+    ];
+
+    // Intento 1: re-encode video + re-encode audio existente a AAC estéreo 44100 Hz
+    const ok = await runFfmpeg(videoArgs, [
+      '-c:a', 'aac', '-ar', '44100', '-ac', '2', '-map', '0:a:0',
     ]);
 
     if (!ok) {
@@ -1885,11 +1903,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
             '-y', '-loglevel', 'error',
             '-i', inputPath,
             '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
-            '-c:v', 'copy',
+            ...videoArgs,
             '-c:a', 'aac', '-ar', '44100', '-ac', '2',
-            '-map', '0:v:0',
             '-map', '1:a',
             '-shortest',
+            '-avoid_negative_ts', 'make_zero',
             '-movflags', '+faststart',
             outputPath,
           ],
