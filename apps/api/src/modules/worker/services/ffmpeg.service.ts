@@ -112,6 +112,8 @@ export class FfmpegService {
     inputPath: string,
     outputPath: string,
     quality: BroadcastQuality,
+    durationSecs?: number,
+    onProgress?: (pct: number) => void,
   ): Promise<void> {
     const q = BROADCAST_QUALITIES[quality];
     const args = [
@@ -125,15 +127,16 @@ export class FfmpegService {
         'format=yuv420p',
       ].join(','),
       '-c:v',          'libx264',
-      '-preset',       'veryfast',   // Balance calidad/velocidad para normalización offline
-      '-crf',          '18',         // Alta calidad: el resultado va directo al espectador (stream-copy)
+      '-preset',       'ultrafast',  // Máxima velocidad: 4-5x más rápido que veryfast.
+                                     // CRF 18 garantiza calidad visual independientemente del preset.
+      '-crf',          '18',
       '-b:v',          q.vBitrate,
       '-maxrate',      q.maxrate,
       '-bufsize',      q.bufsize,
-      '-g',            '50',         // Keyframe cada 50 frames = 2 s a 25 fps
-      '-keyint_min',   '50',         // IDR forzado cada 50 frames
-      '-sc_threshold', '0',          // Sin keyframes extra por scene-cut
-      '-profile:v',    'high',       // H.264 High Profile (compatible HLS)
+      '-g',            '50',
+      '-keyint_min',   '50',
+      '-sc_threshold', '0',
+      '-profile:v',    'high',
       '-level:v',      '4.0',
       // ─── Audio ────────────────────────────────────────────────
       '-c:a', 'aac',
@@ -147,7 +150,7 @@ export class FfmpegService {
       outputPath,
     ];
 
-    await this.runProcess('ffmpeg', args, `norm-${quality}`);
+    await this.runProcess('ffmpeg', args, `norm-${quality}`, { durationSecs, onProgress });
     this.logger.log(`✓ Normalized to ${quality}: ${path.basename(outputPath)}`);
   }
 
@@ -172,6 +175,11 @@ export class FfmpegService {
     command: string,
     args: string[],
     label: string,
+    opts?: {
+      durationSecs?: number;
+      onProgress?: (pct: number) => void;
+      timeoutMs?: number;
+    },
   ): Promise<void> {
     return new Promise((resolve, reject) => {
       this.logger.debug(`[${label}] ${command} ${args.join(' ')}`);
@@ -179,16 +187,34 @@ export class FfmpegService {
       const proc = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
       const stderrLines: string[] = [];
 
+      // Timeout de seguridad — mata FFmpeg si se cuelga sin producir salida
+      const timeoutMs = opts?.timeoutMs ?? 4 * 3600 * 1000; // 4h por defecto
+      const timer = setTimeout(() => {
+        try { proc.kill('SIGKILL'); } catch { /* ya terminó */ }
+        reject(new Error(`FFmpeg [${label}] timeout después de ${timeoutMs / 60000} min`));
+      }, timeoutMs);
+
       proc.stderr.on('data', (d: Buffer) => {
         const line = d.toString().trim();
         if (line) stderrLines.push(line);
-        // Loguear progreso solo si tiene "time="
+
         if (line.includes('time=')) {
           this.logger.verbose(`[${label}] ${line}`);
+
+          // Parsear progreso desde "time=HH:MM:SS.xx" para reportar avance real
+          if (opts?.onProgress && opts?.durationSecs) {
+            const m = line.match(/time=(\d+):(\d+):(\d+\.\d+)/);
+            if (m) {
+              const elapsed = parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseFloat(m[3]);
+              const pct = Math.min(99, (elapsed / opts.durationSecs) * 100);
+              opts.onProgress(pct);
+            }
+          }
         }
       });
 
       proc.on('close', (code) => {
+        clearTimeout(timer);
         if (code === 0) {
           resolve();
         } else {
@@ -198,6 +224,7 @@ export class FfmpegService {
       });
 
       proc.on('error', (err) => {
+        clearTimeout(timer);
         reject(
           new Error(
             `FFmpeg not found: ${err.message}. Asegurate de que FFmpeg esté instalado.`,

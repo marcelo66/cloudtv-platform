@@ -15,7 +15,9 @@ import {
 } from '../../videos/videos.service';
 
 @Processor(VIDEO_QUEUE, {
-  concurrency: 2, // Máximo 2 videos procesando al mismo tiempo
+  concurrency: 1,      // Un video a la vez — FFmpeg ya usa todos los threads disponibles
+  lockDuration: 120_000, // 2 min de lock (default 30s es demasiado corto para normalización)
+  lockRenewTime: 50_000, // Renovar cada 50s (< lockDuration/2 = 60s para margen)
 })
 export class VideoProcessor extends WorkerHost {
   private readonly logger = new Logger(VideoProcessor.name);
@@ -58,22 +60,35 @@ export class VideoProcessor extends WorkerHost {
       await this.storage.downloadToFile(originalKey, inputPath);
       await job.updateProgress(20);
 
+      // Obtener duración del video para reportar progreso real
+      const reNormMeta = await this.ffprobe.getMetadata(inputPath).catch(() => null);
+      const reNormDuration = reNormMeta?.duration;
+
       const qualities: BroadcastQuality[] = ['480p', '720p', '1080p'];
       const normKeyMap: Record<string, string> = {};
 
       for (let qi = 0; qi < qualities.length; qi++) {
         const q = qualities[qi];
         const normPath = path.join(tmpDir, `norm_${q}.mp4`);
+        const qStart = 20 + qi * 23;
+        const qEnd   = qStart + 21;
 
         this.logger.log(`Re-normalizing to ${q} (${qi + 1}/3)…`);
-        await this.ffmpeg.normalizeToBroadcast(inputPath, normPath, q);
+        await this.ffmpeg.normalizeToBroadcast(inputPath, normPath, q, reNormDuration,
+          (ffmpegPct) => {
+            const globalPct = Math.round(qStart + (ffmpegPct / 100) * (qEnd - qStart));
+            job.updateProgress(globalPct).catch(() => {});
+          },
+        );
+
+        await job.updateProgress(qEnd);
 
         const normKey = this.storage.buildNormKey(channelId, videoId, q);
         await this.storage.putObject(normKey, createReadStream(normPath), 'video/mp4');
         normKeyMap[q] = normKey;
 
         await fs.rm(normPath).catch(() => {});
-        await job.updateProgress(20 + (qi + 1) * 25);
+        await job.updateProgress(qStart + 23);
         this.logger.log(`✓ renorm_${q}: ${normKey}`);
       }
 
@@ -169,32 +184,40 @@ export class VideoProcessor extends WorkerHost {
       // Genera 3 versiones pre-normalizadas (480p, 720p, 1080p) desde el original.
       // Cada una queda en S3 con key norm_Xp.mp4 lista para stream-copy en playout.
       //
-      // Esto elimina toda normalización en tiempo de emisión:
-      //   · Sin bg-norm al arrancar el canal
-      //   · Sin stalls en transiciones entre videos
-      //   · Sin reinicios bootstrap (primera ejecución = calidad final)
-      //
       // Usamos stream de lectura para el upload (evita cargar GBs en memoria).
 
       const qualities: BroadcastQuality[] = ['480p', '720p', '1080p'];
       const normKeyMap: Record<string, string> = {};
 
+      // Rango de progreso por calidad: 65→73→81→89
+      // Dentro de cada rango, FFmpeg reporta progreso en tiempo real vía stderr.
+      const NORM_START = 65;
+      const RANGE_PER_Q = 8;
+
       for (let qi = 0; qi < qualities.length; qi++) {
         const q = qualities[qi];
         const normPath = path.join(tmpDir, `norm_${q}.mp4`);
+        const qStart = NORM_START + qi * RANGE_PER_Q;
+        const qEnd   = qStart + RANGE_PER_Q - 1; // -1 para el upload posterior
 
         this.logger.log(`Normalizing to ${q} (${qi + 1}/3)…`);
-        await this.ffmpeg.normalizeToBroadcast(inputPath, normPath, q);
+        await this.ffmpeg.normalizeToBroadcast(inputPath, normPath, q, metadata.duration,
+          (ffmpegPct) => {
+            const globalPct = Math.round(qStart + (ffmpegPct / 100) * (qEnd - qStart));
+            job.updateProgress(globalPct).catch(() => {});
+          },
+        );
+
+        await job.updateProgress(qEnd);
 
         const normKey = this.storage.buildNormKey(channelId, videoId, q);
         await this.storage.putObject(normKey, createReadStream(normPath), 'video/mp4');
         normKeyMap[q] = normKey;
 
-        // Liberar espacio en disco inmediatamente (el original sigue en inputPath)
+        // Liberar espacio en disco inmediatamente
         await fs.rm(normPath).catch(() => {});
 
-        // Progreso: 65% → 70% → 80% → 90%
-        await job.updateProgress(65 + (qi + 1) * 8);
+        await job.updateProgress(qStart + RANGE_PER_Q);
         this.logger.log(`✓ norm_${q} subido a S3: ${normKey}`);
       }
 
