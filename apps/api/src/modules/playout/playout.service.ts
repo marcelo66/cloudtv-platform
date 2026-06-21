@@ -486,11 +486,18 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           }
         }
         session.bgNormRunning = false;
-        // Los archivos normalizados quedan en caché para el próximo inicio del canal.
-        // NO se reinicia FFmpeg automáticamente: interrumpir el stream para ahorrar CPU
-        // no es aceptable en broadcast. El próximo inicio del canal usará stream-copy.
         if (!session.stopping && this.sessions.has(session.channelId)) {
-          this.log(session, `✓ Normalización completa (${done}/${normQueue.length}) → listos para próximo inicio`);
+          if (done > 0 && session.process) {
+            // Al menos un video se normalizó: reiniciar FFmpeg para usar stream-copy en
+            // el próximo ciclo. Con resume por horario la interrupción es < 4s y el
+            // canal retoma exactamente donde estaba. Los archivos prenorm eliminan el
+            // stall de transición que ocurre al abrir un MP4 raw sin faststart.
+            this.log(session, `✓ [bg-norm] ${done}/${normQueue.length} completados → reiniciando para stream-copy`);
+            session.scheduleChangePending = true;
+            try { session.process.kill('SIGTERM'); } catch {}
+          } else {
+            this.log(session, `✓ Normalización completa (${done}/${normQueue.length}) → listos para próximo inicio`);
+          }
         }
       })();
     } else {
@@ -1859,9 +1866,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
    */
   private startSegmentWatchdog(session: PlayoutSession, m3u8Path: string): void {
     const POLL_MS  = 5_000;   // comprobar cada 5 s
-    const STALL_MS = 45_000;  // 45 s sin nuevo segmento = FFmpeg estancado
-    // 45s: el concat demuxer puede tardar 30s+ en abrir el siguiente archivo si es un
-    // MP4 raw grande (moov al final). Con archivos prenorm el stall no ocurre (< 1s).
+    const STALL_MS = 25_000;  // 25 s sin nuevo segmento = FFmpeg estancado
+    // 25s: suficiente para cubrir una transición legítima lenta entre archivos del concat
+    // (en prenorm < 1s, en raw con faststart < 5s, en raw sin faststart hasta ~20s).
+    // Reducido de 45s: con auto-restart post-norm-bg ya no necesitamos tolerar stalls
+    // largos — cuando toda la playlist está normalizada, los stalls no ocurren.
 
     let lastMtime    = 0;
     let lastUpdateAt = Date.now();
