@@ -580,6 +580,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
     const concatPath = path.join(session.hlsDir, 'concat.txt');
     const concatLines: string[] = [];
+    // Registra el índice en concatLines donde empieza el contenido de cada ítem del playlist
+    // (DESPUÉS de sus pre-rolls, ANTES de la primera línea `file`). Usado para resume via inpoint.
+    const videoStartLineIdx = new Map<number, number>();
     let totalAdsInjected = 0;
     let intervalElapsed = 0; // segundos de contenido acumulados desde la última tanda de intervalo
 
@@ -633,6 +636,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
       // PRE_ROLL de cue points
       for (const cp of preRolls) await insertBlock(cp.adBlock, 'PRE_ROLL');
+
+      // Registrar dónde empieza el contenido de este ítem (tras pre-rolls, antes del primer `file`)
+      videoStartLineIdx.set(i, concatLines.length);
 
       // Video principal (con posibles MID_ROLLs de cue points)
       if (midRolls.length === 0) {
@@ -762,60 +768,94 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     // ── Reanudación por horario: calcular posición correcta en el ciclo ─────────
     //
     // Cuando FFmpeg reinicia (stall, schedule-change, crash), la emisión debe
-    // continuar donde le corresponde según el reloj del canal, no desde el
-    // principio del playlist.
+    // continuar donde le corresponde según el reloj del canal.
     //
     // Ancla (por prioridad):
     //   1. scheduleEntry.startTime — hay un programa activo con hora conocida
-    //   2. session.contentStartedAt — el canal lleva emitiendo desde esa marca
-    //   3. Sin ancla (primer arranque) → seek = 0, inicia desde el principio
+    //   2. session.contentStartedAt — canal llevaba emitiendo desde esa marca
+    //   3. Sin ancla (primer arranque) → sin resume, empieza desde el principio
     //
-    // La posición dentro del ciclo se calcula con módulo para tolerar schedules
-    // que comenzaron hace muchos ciclos (ej: schedule de 24h × repetición diaria).
+    // IMPORTANTE: el concat demuxer NO soporta seek global con -ss. La solución
+    // correcta es partir la primera copia del ciclo a partir del video correcto
+    // y agregar la directiva `inpoint` al primer archivo en el concat.
     let resumeSeekSeconds = 0;
-    if (totalDuration > 0) {
-      if (scheduleEntry?.startTime) {
-        const elapsedMs = Date.now() - (scheduleEntry.startTime as Date).getTime();
-        const elapsed   = Math.max(0, elapsedMs / 1000);
-        resumeSeekSeconds = elapsed % totalDuration;
-      } else if (session.contentStartedAt) {
-        const elapsedMs = Date.now() - session.contentStartedAt;
-        const elapsed   = Math.max(0, elapsedMs / 1000);
-        resumeSeekSeconds = elapsed % totalDuration;
-      }
+    if (scheduleEntry?.startTime) {
+      const elapsedMs = Date.now() - (scheduleEntry.startTime as Date).getTime();
+      resumeSeekSeconds = Math.max(0, elapsedMs / 1000);
+    } else if (session.contentStartedAt) {
+      const elapsedMs = Date.now() - session.contentStartedAt;
+      resumeSeekSeconds = Math.max(0, elapsedMs / 1000);
     }
-    if (resumeSeekSeconds > 5) {
+
+    // Usar solo la duración de contenido (sin filler) para el módulo.
+    // El filler rota aleatoriamente y no tiene posición fija que "reanudar".
+    const contentDurationForResume = playlist.items.reduce((sum, pItem) => {
+      const ts = pItem.trimStart ?? 0;
+      const te = pItem.trimEnd ?? (pItem.video.duration ?? 0);
+      return sum + Math.max(0, te - ts);
+    }, 0);
+
+    let resumeVideoIndex = 0;
+    let resumeVideoOffset = 0; // posición absoluta dentro del archivo (incluye trimStart)
+    if (resumeSeekSeconds > 5 && contentDurationForResume > 0) {
+      const seekInCycle = resumeSeekSeconds % contentDurationForResume;
+      let cumDur = 0;
+      for (let idx = 0; idx < playlist.items.length; idx++) {
+        const pItem  = playlist.items[idx];
+        const ts     = pItem.trimStart ?? 0;
+        const te     = pItem.trimEnd ?? (pItem.video.duration ?? 0);
+        const segDur = Math.max(0, te - ts);
+        if (cumDur + segDur > seekInCycle) {
+          resumeVideoIndex  = idx;
+          resumeVideoOffset = (seekInCycle - cumDur) + ts;
+          break;
+        }
+        cumDur += segDur;
+      }
       this.log(
         session,
-        `⏩ Reanudando en ${resumeSeekSeconds.toFixed(1)}s del ciclo` +
-        ` (${(resumeSeekSeconds / 60).toFixed(1)}min /` +
-        ` ${(totalDuration / 60).toFixed(1)}min ciclo)`,
+        `⏩ Reanudando en video ${resumeVideoIndex + 1}/${playlist.items.length}` +
+        ` · ${resumeVideoOffset.toFixed(1)}s` +
+        ` (${(resumeSeekSeconds / 60).toFixed(1)}min transcurridos · ciclo ${(contentDurationForResume / 60).toFixed(1)}min)`,
       );
     }
-    // Argumentos de seek (input-side: FFmpeg salta al punto sin leer todo el concat)
-    const seekArgs: string[] = resumeSeekSeconds > 5
-      ? ['-ss', resumeSeekSeconds.toFixed(3)]
-      : [];
 
     // ── Expansión del concat para cobertura ~24h sin -stream_loop ────────────────
-    //
-    // -stream_loop -1 causa una DISCONTINUIDAD PTS al hacer wrap-around:
-    //   los timestamps saltan hacia atrás (ej: 3600s → 0s), el HLS muxer
-    //   inserta EXT-X-DISCONTINUITY o el player detecta el salto y re-bufferiza.
-    //
-    // Solución: repetir las entradas del concat para cubrir ~24h de emisión sin
-    // ningún wrap-around. Cuando FFmpeg termina (code=0), el close handler
-    // reinicia el proceso en 1 s con un nuevo concat expandido.
-    //
-    // Con reanudación: cubrir 24h DESDE el punto de seek (no desde el inicio),
-    // por eso sumamos resumeSeekSeconds al total necesario.
-    const COVERAGE_SECONDS = 24 * 3600; // 24 horas de cobertura continua
+    const COVERAGE_SECONDS = 24 * 3600;
     const loopCount = totalDuration > 0
       ? Math.max(1, Math.ceil((COVERAGE_SECONDS + resumeSeekSeconds) / totalDuration))
-      : 50; // fallback cuando las duraciones son desconocidas
-    const expandedLines = loopCount > 1
-      ? Array.from({ length: loopCount }, () => concatLines).flat()
-      : concatLines;
+      : 50;
+
+    // ── Construir concat expandido con inpoint para reanudación frame-accurate ───
+    //
+    // La primera "vuelta" del concat comienza en el video correcto (startLine).
+    // Se agrega `inpoint resumeVideoOffset` al primer archivo para saltar dentro
+    // del video sin leer el archivo desde el inicio (seek dentro del MP4 individual).
+    // Las vueltas siguientes son ciclos completos desde el video 0.
+    const startLine = (resumeVideoIndex > 0 || resumeVideoOffset > 5)
+      ? (videoStartLineIdx.get(resumeVideoIndex) ?? 0)
+      : 0;
+    let firstCycleFragment = [...concatLines.slice(startLine)];
+
+    if (resumeVideoOffset > 5 && firstCycleFragment.length > 0) {
+      const firstFileLineIdx = firstCycleFragment.findIndex(l => l.startsWith("file '"));
+      if (firstFileLineIdx >= 0) {
+        const insertAt = firstFileLineIdx + 1;
+        if (firstCycleFragment[insertAt]?.startsWith('inpoint ')) {
+          // Ya existe inpoint (trimStart del item) → usar el mayor de los dos
+          const existing = parseFloat(firstCycleFragment[insertAt].replace('inpoint ', ''));
+          firstCycleFragment[insertAt] = `inpoint ${Math.max(existing, resumeVideoOffset).toFixed(3)}`;
+        } else {
+          firstCycleFragment.splice(insertAt, 0, `inpoint ${resumeVideoOffset.toFixed(3)}`);
+        }
+      }
+    }
+
+    const remainingCycles = Array.from({ length: Math.max(0, loopCount - 1) }, () => concatLines).flat();
+    const expandedLines = startLine === 0 && resumeVideoOffset <= 5
+      ? (loopCount > 1 ? Array.from({ length: loopCount }, () => concatLines).flat() : concatLines)
+      : [...firstCycleFragment, ...remainingCycles];
+
     if (loopCount > 1) {
       this.log(session, `Playlist expandida: ${loopCount}× → ~${Math.round(totalDuration * loopCount / 3600)}h de emisión continua sin wrap-around`);
     }
@@ -950,7 +990,6 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           // Ruta A: decode + filter_complex + encode
           '-loglevel', 'warning',
           '-re',
-          ...seekArgs,        // seek input-side: FFmpeg salta al punto sin leer todo el concat
           ...inputFlags,
           '-thread_queue_size', '512',
           '-f', 'concat', '-safe', '0', '-i', concatPath,
@@ -967,7 +1006,6 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
             // Ruta B: stream-copy — bitstream pasa directo al muxer HLS sin decode/encode
             '-loglevel', 'warning',
             '-re',
-            ...seekArgs,      // seek input-side (norm files tienen keyframe cada 2s → seek preciso)
             '-thread_queue_size', '512',
             '-f', 'concat', '-safe', '0', '-i', concatPath,
             '-c', 'copy',
@@ -982,7 +1020,6 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
             // Ruta C: re-encode en tiempo real (archivos raw, primer arranque)
             '-loglevel', 'warning',
             '-re',
-            ...seekArgs,      // seek input-side: salta al punto de reanudación
             ...inputFlags,
             '-thread_queue_size', '512',
             '-f', 'concat', '-safe', '0', '-i', concatPath,
@@ -1935,6 +1972,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         // ─── Timestamps ────────────────────────────────────────────────────
         '-avoid_negative_ts', 'make_zero',
         '-movflags', '+faststart',
+        // -f mp4: forzar formato de salida porque la extensión es .tmp (no .mp4)
+        // y FFmpeg no puede detectar el muxer por extensión en este caso.
+        '-f', 'mp4',
         tmpOutput,
       ], { stdio: ['ignore', 'ignore', 'pipe'] });
       proc.stderr.on('data', (d: Buffer) => stderrLines.push(d.toString().trim()));
