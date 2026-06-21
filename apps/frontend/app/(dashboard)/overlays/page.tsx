@@ -181,9 +181,9 @@ function OffsetInputs({
 const DEFAULT_CONFIG: Record<OverlayType, Record<string, any>> = {
   LOGO:        { position: 'top-left', width: 120, opacity: 1, offsetX: 0, offsetY: 0 },
   TEXT_STATIC: { text: '', position: 'bottom-right', fontSize: 24, fontColor: 'white', bgColor: 'black@0.5', bold: false, offsetX: 0, offsetY: 0 },
-  TEXT_SCROLL: { text: '', position: 'bottom', fontSize: 20, fontColor: 'white', bgColor: 'black@0.7', speed: 80, barHeight: 36 },
+  TEXT_SCROLL: { text: '', position: 'bottom', fontSize: 20, fontColor: 'white', bgColor: 'black@0.7', speed: 80, barHeight: 36, offsetX: 0, offsetY: 0 },
   CLOCK:       { position: 'top-right', fontSize: 28, fontColor: 'white', bgColor: 'black@0.6', format: 'time_short', timezone: 'America/Argentina/Buenos_Aires', offsetX: 0, offsetY: 0 },
-  TICKER:      { text: '', position: 'bottom', fontSize: 20, fontColor: 'white', bgColor: 'black@0.7', speed: 80, barHeight: 36 },
+  TICKER:      { text: '', position: 'bottom', fontSize: 20, fontColor: 'white', bgColor: 'black@0.7', speed: 80, barHeight: 36, offsetX: 0, offsetY: 0 },
   TEMPERATURE: { city: 'Buenos Aires', unit: 'celsius', showUnit: true, position: 'top-right', fontSize: 28, fontColor: 'white', bgColor: 'black@0.6', offsetX: 0, offsetY: 0 },
 };
 
@@ -637,6 +637,7 @@ function OverlayFormModal({
                     className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
                 </div>
               </div>
+              <OffsetInputs config={config} setCfg={setCfg} />
             </div>
           )}
 

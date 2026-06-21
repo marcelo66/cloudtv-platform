@@ -1599,20 +1599,23 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
       } else if (ov.type === OverlayType.TEXT_SCROLL || ov.type === OverlayType.TICKER) {
         const barH    = cfg.barHeight ?? 36;
-        const offY    = cfg.offsetY ?? 0;   // ajuste fino vertical en px (positivo=subir barra bottom / bajar barra top)
+        const offX    = cfg.offsetX ?? 0;  // margen izquierdo de la banda en px (+ derecha / − no aplica)
+        const offY    = cfg.offsetY ?? 0;  // desplazamiento vertical en px (+ abajo / − arriba desde el ancla)
         const isBot   = (cfg.position ?? 'bottom') !== 'top';
-        // drawbox usa iw/ih; desplazamiento vertical calculado en JS para evitar expresiones complejas en el filtro
-        const barY    = isBot ? `ih-${barH + offY}` : `${offY}`;
-        const textY   = isBot ? `H-${barH + offY}+(${barH}-text_h)/2` : `${offY}+(${barH}-text_h)/2`;
-        // Fórmula: arranca fuera del borde derecho y avanza speed px/s hacia la izquierda
-        // SIN fix_bounds — el texto debe salir por la izquierda para scrollear correctamente
+        // drawbox usa iw/ih; offsets calculados en JS para evitar expresiones complejas en el filtro
+        const barX    = Math.max(0, offX);
+        const barW    = `iw-${barX}`;
+        const barY    = isBot ? `ih-${barH + offY}` : `${Math.max(0, offY)}`;
+        const textY   = isBot ? `H-${barH + offY}+(${barH}-text_h)/2` : `${Math.max(0, offY)}+(${barH}-text_h)/2`;
+        // scrollX: el texto entra por el borde derecho (W) y sale por la izquierda (-text_w)
+        // SIN fix_bounds — el texto DEBE poder salirse de pantalla para que el scroll sea visible
         const scrollX = `W-mod(t*${cfg.speed ?? 80}\\,W+text_w)`;
         // Usar textfile para evitar problemas de escape con texto largo/complejo
         const tickerFile = `/tmp/cloudtv-ticker-${session.channelId}-${ov.id}.txt`;
         await fs.writeFile(tickerFile, cfg.text ?? '', 'utf8').catch(() => {});
         const barLabel = `bar${idx}`;
         filterParts.push(withEnable(
-          `[${currentStream}]drawbox=x=0:y=${barY}:w=iw:h=${barH}:color=${cfg.bgColor ?? 'black@0.7'}:t=fill`,
+          `[${currentStream}]drawbox=x=${barX}:y=${barY}:w=${barW}:h=${barH}:color=${cfg.bgColor ?? 'black@0.7'}:t=fill`,
         ) + `[${barLabel}]`);
         filterParts.push(withEnable(
           `[${barLabel}]drawtext=fontfile=${FONT}:textfile=${tickerFile}:reload=1:fontsize=${cfg.fontSize ?? 20}:fontcolor=${cfg.fontColor ?? 'white'}:x=${scrollX}:y=${textY}`,
