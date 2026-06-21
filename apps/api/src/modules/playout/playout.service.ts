@@ -1021,10 +1021,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     // la transición entre clips del concat. Sin esto, un MP4 con moov al final puede
     // causar un stall de 30-60s mientras FFmpeg busca los metadatos del siguiente archivo.
     const inputFlags = [
-      '-fflags', '+genpts+discardcorrupt',
+      '-fflags', '+genpts+igndts+discardcorrupt',
       '-err_detect', 'ignore_err',
-      '-probesize', '4M',
-      '-analyzeduration', '5000000',
+      '-probesize', '10M',
+      '-analyzeduration', '10000000',
     ];
 
     // ─── RUTAS FFmpeg ──────────────────────────────────────────────────────────────
@@ -1138,15 +1138,33 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    // Detector rápido de fallo total de decode H.264 (ocurre al transicionar a raw MP4
+    // con moov al final: el concat demuxer no puede re-inicializar el decoder → stall).
+    // Si vemos el error repetido >10 veces en 4s, matamos FFmpeg sin esperar los 25s
+    // del watchdog de segmentos → reduce el corte de 25s a ~2-3s.
+    let h264ErrCount = 0;
+    let h264ErrResetTimer: ReturnType<typeof setTimeout> | null = null;
+
     proc.stderr.on('data', (chunk: Buffer) => {
       chunk.toString().split('\n').forEach(l => {
         const t = l.trim();
         if (!t) return;
-        // Suprimir "Late SEI is not implemented" — warning inofensivo del decoder
-        // H.264 en los archivos de entrada; no afecta la salida re-encodada
+        // Suprimir warnings inofensivos del decoder H.264
         if (t.includes('Late SEI') || t.includes('late_sei') ||
             t.includes('streams.videolan.org') || t.includes('ffmpeg-devel')) return;
         this.log(session, `ffmpeg: ${t}`);
+
+        // Detectar fallo total de decode H.264 (sin start codes = AVCC sin re-init)
+        if (t.includes('No start code is found') || t.includes('Error splitting the input into NAL')) {
+          h264ErrCount++;
+          if (!h264ErrResetTimer) {
+            h264ErrResetTimer = setTimeout(() => { h264ErrCount = 0; h264ErrResetTimer = null; }, 4_000);
+          }
+          if (h264ErrCount > 12 && !session.stopping && session.process === proc) {
+            this.log(session, 'WARN: H.264 decode falló repetidamente → reiniciando FFmpeg (evita esperar 25s watchdog)');
+            try { proc.kill('SIGTERM'); } catch { /* ok */ }
+          }
+        }
       });
     });
 
