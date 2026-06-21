@@ -948,20 +948,24 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       if (ov.type === OverlayType.TEMPERATURE) {
         await this.writeTempFile(session, ov);
       }
-      if (ov.type === OverlayType.TICKER || ov.type === OverlayType.TEXT_SCROLL) {
+      if ((ov.type === OverlayType.TICKER || ov.type === OverlayType.TEXT_SCROLL) &&
+          (ov.config as any).textSource === 'rss') {
+        // Modo RSS: escribir el archivo que usará textfile=+reload=1 en FFmpeg
         const cfg = ov.config as any;
         const tickerFile = `/tmp/cloudtv-ticker-${session.channelId}-${ov.id}.txt`;
-        if (cfg.textSource === 'rss' && cfg.rssUrl) {
+        const fallback = (cfg.text ?? '').replace(/\r?\n/g, ' ').trim() || ov.name;
+        if (cfg.rssUrl) {
           try {
             const text = await this.fetchRssFeed(cfg.rssUrl, cfg.rssItems ?? 5);
             await fs.writeFile(tickerFile, text, 'utf8');
-            this.log(session, `✓ [rss] Feed cargado (${(cfg.rssItems ?? 5)} noticias): ${text.slice(0, 60)}…`);
+            this.log(session, `✓ [rss] ${cfg.rssItems ?? 5} noticias cargadas: ${text.slice(0, 80)}…`);
           } catch (e: any) {
-            this.log(session, `WARN: [rss] No se pudo obtener feed, usando texto de respaldo: ${e.message}`);
-            await fs.writeFile(tickerFile, cfg.text ?? '', 'utf8').catch(() => {});
+            this.log(session, `WARN: [rss] Feed "${cfg.rssUrl}" falló (${e.message}) → usando texto de respaldo`);
+            await fs.writeFile(tickerFile, fallback, 'utf8').catch(() => {});
           }
         } else {
-          await fs.writeFile(tickerFile, cfg.text ?? '', 'utf8').catch(() => {});
+          this.log(session, `WARN: [rss] Ticker "${ov.name}" no tiene URL configurada → usando texto de respaldo`);
+          await fs.writeFile(tickerFile, fallback, 'utf8').catch(() => {});
         }
       }
     }
@@ -1624,26 +1628,34 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
       } else if (ov.type === OverlayType.TEXT_SCROLL || ov.type === OverlayType.TICKER) {
         const barH    = cfg.barHeight ?? 36;
-        const offX    = cfg.offsetX ?? 0;  // margen izquierdo de la banda en px (+ derecha / − no aplica)
-        const offY    = cfg.offsetY ?? 0;  // desplazamiento vertical en px (+ abajo / − arriba desde el ancla)
+        const offX    = cfg.offsetX ?? 0;
+        const offY    = cfg.offsetY ?? 0;
         const isBot   = (cfg.position ?? 'bottom') !== 'top';
-        // drawbox usa iw/ih; offsets calculados en JS para evitar expresiones complejas en el filtro
         const barX    = Math.max(0, offX);
         const barW    = `iw-${barX}`;
         const barY    = isBot ? `ih-${barH + offY}` : `${Math.max(0, offY)}`;
         const textY   = isBot ? `H-${barH + offY}+(${barH}-text_h)/2` : `${Math.max(0, offY)}+(${barH}-text_h)/2`;
-        // scrollX: el texto entra por el borde derecho (W) y sale por la izquierda (-text_w)
-        // SIN fix_bounds — el texto DEBE poder salirse de pantalla para que el scroll sea visible
+        // SIN fix_bounds: el texto debe salirse de pantalla para scrollear
         const scrollX = `W-mod(t*${cfg.speed ?? 80}\\,W+text_w)`;
-        // Archivo ya escrito en pre-flight (writeTempFile/fetchRssFeed antes de arrancar FFmpeg)
-        const tickerFile = `/tmp/cloudtv-ticker-${session.channelId}-${ov.id}.txt`;
         const barLabel = `bar${idx}`;
         filterParts.push(withEnable(
           `[${currentStream}]drawbox=x=${barX}:y=${barY}:w=${barW}:h=${barH}:color=${cfg.bgColor ?? 'black@0.7'}:t=fill`,
         ) + `[${barLabel}]`);
-        filterParts.push(withEnable(
-          `[${barLabel}]drawtext=fontfile=${FONT}:textfile=${tickerFile}:reload=1:fontsize=${cfg.fontSize ?? 20}:fontcolor=${cfg.fontColor ?? 'white'}:x=${scrollX}:y=${textY}`,
-        ) + `[${nextStream}]`);
+
+        if (cfg.textSource === 'rss') {
+          // RSS: textfile= + reload=1 → FFmpeg re-lee en cada frame para reflejar actualizaciones
+          // El archivo es escrito en pre-flight por fetchRssFeed() y refrescado por startRssRefresh()
+          const tickerFile = `/tmp/cloudtv-ticker-${session.channelId}-${ov.id}.txt`;
+          filterParts.push(withEnable(
+            `[${barLabel}]drawtext=fontfile=${FONT}:textfile=${tickerFile}:reload=1:fontsize=${cfg.fontSize ?? 20}:fontcolor=${cfg.fontColor ?? 'white'}:x=${scrollX}:y=${textY}`,
+          ) + `[${nextStream}]`);
+        } else {
+          // Manual: text= inline, sin dependencia de archivo
+          const text = this.escapeText((cfg.text ?? '').replace(/\r?\n/g, ' ').trim() || ' ');
+          filterParts.push(withEnable(
+            `[${barLabel}]drawtext=fontfile=${FONT}:text=${text}:fontsize=${cfg.fontSize ?? 20}:fontcolor=${cfg.fontColor ?? 'white'}:x=${scrollX}:y=${textY}`,
+          ) + `[${nextStream}]`);
+        }
 
       } else if (ov.type === OverlayType.TEMPERATURE) {
         // TEMPERATURE: lee la temperatura desde un archivo temporal actualizado periódicamente.
@@ -1807,7 +1819,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
   // ─── RSS ticker refresh ────────────────────────────────────────
 
-  /** Descarga y parsea un feed RSS/Atom, devuelve los títulos unidos por separador. */
+  /** Descarga y parsea un feed RSS/Atom, devuelve los títulos en una sola línea. */
   private async fetchRssFeed(url: string, maxItems: number): Promise<string> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 12_000);
@@ -1817,21 +1829,38 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const xml = await resp.text();
 
-      // Captura títulos de RSS 2.0 (<item>) y Atom (<entry>)
-      // Soporta texto plano, CDATA y entidades HTML básicas
+      const decodeEntities = (s: string) => s
+        .replace(/&amp;/g,  '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#39;/g, "'")
+        .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n))
+        .replace(/<[^>]+>/g, '')  // quitar cualquier tag anidado
+        .replace(/\s+/g, ' ').trim();
+
       const titles: string[] = [];
-      const re = /<(?:item|entry)[\s>][\s\S]*?<title[^>]*>(?:<!\[CDATA\[)?\s*([\s\S]*?)\s*(?:\]\]>)?<\/title>/gi;
+
+      // RSS 2.0: <item>...<title>...</title>...
+      // Atom:    <entry>...<title>...</title>...
+      // Acepta CDATA, atributos en el tag title, y texto multilínea
+      const reItem = /<(?:item|entry)(?:\s[^>]*)?>[\s\S]*?<title(?:\s[^>]*)?>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/gi;
       let m: RegExpExecArray | null;
-      while ((m = re.exec(xml)) !== null && titles.length < maxItems) {
-        const title = m[1]
-          .replace(/&amp;/g,  '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-          .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#39;/g, "'")
-          .replace(/<[^>]+>/g, '')   // quitar tags anidados
-          .replace(/\s+/g, ' ')
-          .trim();
+      while ((m = reItem.exec(xml)) !== null && titles.length < maxItems) {
+        const title = decodeEntities(m[1]);
         if (title) titles.push(title);
       }
+
+      // Fallback: si no hubo <item>/<entry>, intentar <title> directos (saltando el primero = título del canal)
+      if (titles.length === 0) {
+        const reTitle = /<title(?:\s[^>]*)?>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/gi;
+        let first = true;
+        while ((m = reTitle.exec(xml)) !== null && titles.length < maxItems) {
+          if (first) { first = false; continue; } // saltar título del canal
+          const title = decodeEntities(m[1]);
+          if (title) titles.push(title);
+        }
+      }
+
       if (titles.length === 0) throw new Error('No se encontraron títulos en el feed');
+      // Una sola línea (FFmpeg drawtext textfile debe ser 1 línea)
       return titles.join('   ●   ');
     } finally {
       clearTimeout(timer);
@@ -1862,7 +1891,8 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         const tickerFile = `/tmp/cloudtv-ticker-${session.channelId}-${ov.id}.txt`;
         try {
           const text = await this.fetchRssFeed(cfg.rssUrl, cfg.rssItems ?? 5);
-          await fs.writeFile(tickerFile, text, 'utf8');
+          // Una sola línea — FFmpeg drawtext textfile requiere contenido sin saltos de línea
+          await fs.writeFile(tickerFile, text.replace(/\r?\n/g, ' '), 'utf8');
           this.log(session, `✓ [rss] Ticker refrescado: ${text.slice(0, 50)}…`);
         } catch (e: any) {
           this.log(session, `WARN: [rss] Error refrescando ticker: ${e.message}`);
