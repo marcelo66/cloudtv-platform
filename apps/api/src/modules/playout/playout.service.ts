@@ -1598,20 +1598,24 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         ) + `[${nextStream}]`);
 
       } else if (ov.type === OverlayType.TEXT_SCROLL || ov.type === OverlayType.TICKER) {
-        const text    = this.escapeText(cfg.text ?? '');
         const barH    = cfg.barHeight ?? 36;
+        const offY    = cfg.offsetY ?? 0;   // ajuste fino vertical en px (positivo=subir barra bottom / bajar barra top)
         const isBot   = (cfg.position ?? 'bottom') !== 'top';
-        const barY    = isBot ? `ih-${barH}` : '0';  // drawbox usa ih/iw, no H/W
-        const textY   = isBot ? `H-${barH}+(${barH}-text_h)/2` : `(${barH}-text_h)/2`;
-        // Fórmula: el texto arranca en el borde derecho y avanza speed px/s
-        // mod(...) garantiza que reinicia el ciclo al llegar al extremo izquierdo
+        // drawbox usa iw/ih; desplazamiento vertical calculado en JS para evitar expresiones complejas en el filtro
+        const barY    = isBot ? `ih-${barH + offY}` : `${offY}`;
+        const textY   = isBot ? `H-${barH + offY}+(${barH}-text_h)/2` : `${offY}+(${barH}-text_h)/2`;
+        // Fórmula: arranca fuera del borde derecho y avanza speed px/s hacia la izquierda
+        // SIN fix_bounds — el texto debe salir por la izquierda para scrollear correctamente
         const scrollX = `W-mod(t*${cfg.speed ?? 80}\\,W+text_w)`;
+        // Usar textfile para evitar problemas de escape con texto largo/complejo
+        const tickerFile = `/tmp/cloudtv-ticker-${session.channelId}-${ov.id}.txt`;
+        await fs.writeFile(tickerFile, cfg.text ?? '', 'utf8').catch(() => {});
         const barLabel = `bar${idx}`;
         filterParts.push(withEnable(
           `[${currentStream}]drawbox=x=0:y=${barY}:w=iw:h=${barH}:color=${cfg.bgColor ?? 'black@0.7'}:t=fill`,
         ) + `[${barLabel}]`);
         filterParts.push(withEnable(
-          `[${barLabel}]drawtext=fontfile=${FONT}:text=${text}:fontsize=${cfg.fontSize ?? 20}:fontcolor=${cfg.fontColor ?? 'white'}:x=${scrollX}:y=${textY}:fix_bounds=1`,
+          `[${barLabel}]drawtext=fontfile=${FONT}:textfile=${tickerFile}:reload=1:fontsize=${cfg.fontSize ?? 20}:fontcolor=${cfg.fontColor ?? 'white'}:x=${scrollX}:y=${textY}`,
         ) + `[${nextStream}]`);
 
       } else if (ov.type === OverlayType.TEMPERATURE) {
