@@ -1,0 +1,24 @@
+{
+  "name": "cloudtv-platform",
+  "private": true,
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "api:dev": "turbo run dev --filter=api",
+    "frontend:dev": "turbo run dev --filter=frontend",
+    "db:push": "cd apps/api && pnpm prisma db push",
+    "db:migrate": "cd apps/api && pnpm prisma migrate dev",
+    "db:studio": "cd apps/api && pnpm prisma studio",
+    "docker:dev": "docker compose -f infrastructure/docker-compose.dev.yml up -d",
+    "docker:down": "docker compose -f infrastructure/docker-compose.dev.yml down"
+  },
+  "devDependencies": {
+    "turbo": "^2.0.0"
+  },
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  }
+}
