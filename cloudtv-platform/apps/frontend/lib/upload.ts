@@ -56,6 +56,7 @@ export async function uploadVideo(
   file: File,
   channelId: string,
   callbacks: UploadCallbacks = {},
+  folder?: string,
 ): Promise<UploadResult> {
   const { onProgress, onStatusChange, signal } = callbacks;
 
@@ -69,6 +70,7 @@ export async function uploadVideo(
     fileSize: file.size,
     mimeType: file.type || 'video/mp4',
     channelId,
+    ...(folder ? { folder } : {}),
   });
 
   const { videoId } = initiateRes.data as { videoId: string };

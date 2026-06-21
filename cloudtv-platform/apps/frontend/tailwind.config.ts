@@ -11,9 +11,34 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // Paleta principal — dark profesional
+        // ── shadcn/ui CSS variable colors ────────────────────────
+        border:      'hsl(var(--border))',
+        input:       'hsl(var(--input))',
+        ring:        'hsl(var(--ring))',
+        background:  'hsl(var(--background))',
+        foreground:  'hsl(var(--foreground))',
+        primary: {
+          DEFAULT:    'hsl(var(--primary))',
+          foreground: 'hsl(var(--primary-foreground))',
+        },
+        muted: {
+          DEFAULT:    'hsl(var(--muted))',
+          foreground: 'hsl(var(--muted-foreground))',
+        },
+        accent: {
+          DEFAULT:    'hsl(var(--accent))',
+          foreground: 'hsl(var(--accent-foreground))',
+        },
+        destructive: {
+          DEFAULT:    'hsl(var(--destructive))',
+        },
+        card: {
+          DEFAULT:    'hsl(var(--card))',
+          foreground: 'hsl(var(--card-foreground))',
+        },
+        // ── Paleta principal — dark profesional ──────────────────
         brand: {
-          50: '#f0f4ff',
+          50:  '#f0f4ff',
           100: '#e0e9ff',
           500: '#4f6ef7',
           600: '#3b5bdb',

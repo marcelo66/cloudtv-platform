@@ -7,12 +7,29 @@ import {
 import slugify from 'slugify';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateChannelDto, UpdateChannelDto } from './dto/create-channel.dto';
+import { PlayoutService } from '../playout/playout.service';
+import { PLAN_LIMITS } from '../common/constants/plan-limits';
 
 @Injectable()
 export class ChannelsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private playout: PlayoutService,
+  ) {}
 
   async create(userId: string, dto: CreateChannelDto) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (user) {
+      const channelCount = await this.prisma.channel.count({ where: { userId } });
+      const planLimit = PLAN_LIMITS[user.plan]?.maxChannels ?? 1;
+      const effectiveLimit = user.maxChannels ?? planLimit;
+      if (channelCount >= effectiveLimit) {
+        throw new ForbiddenException(
+          `Tu plan ${user.plan} permite máximo ${effectiveLimit} canal(es). Actualiza tu plan para crear más.`,
+        );
+      }
+    }
+
     let slug = dto.slug || slugify(dto.name, { lower: true, strict: true });
 
     // Verificar unicidad del slug
@@ -76,6 +93,22 @@ export class ChannelsService {
       data: { streamKey: uuidv4() },
       select: { streamKey: true },
     });
+  }
+
+  async startChannel(channelId: string, userId: string) {
+    await this.playout.start(channelId, userId);
+    return this.prisma.channel.findUnique({ where: { id: channelId } });
+  }
+
+  async stopChannel(channelId: string, userId: string) {
+    await this.playout.stop(channelId, userId);
+    return this.prisma.channel.findUnique({ where: { id: channelId } });
+  }
+
+  async remove(channelId: string, userId: string) {
+    await this.ensureOwnership(channelId, userId);
+    await this.prisma.channel.delete({ where: { id: channelId } });
+    return { success: true };
   }
 
   async getDashboardStats(userId: string) {

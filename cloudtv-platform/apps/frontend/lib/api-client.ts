@@ -1,6 +1,8 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000/api';
+// Usa URL relativa → Next.js proxia server-to-server via app/api/[...path]/route.ts
+// Así no hay CORS y no dependemos de variables de build-time.
+const API_URL = '/api';
 
 export const apiClient = axios.create({
   baseURL: API_URL,

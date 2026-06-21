@@ -7,6 +7,12 @@ import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 
+// BigInt no es serializable por JSON.stringify por defecto
+// Esto lo convierte a Number al hacer res.json()
+(BigInt.prototype as unknown as Record<string, unknown>).toJSON = function () {
+  return Number(this);
+};
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
     logger: ['error', 'warn', 'log', 'debug'],
@@ -20,12 +26,9 @@ async function bootstrap() {
   app.use(helmet());
   app.use(compression());
 
-  // CORS
+  // CORS — acepta cualquier origen (seguro porque usamos JWT, no cookies)
   app.enableCors({
-    origin: [
-      'http://localhost:3000',
-      configService.get<string>('APP_URL', 'http://localhost'),
-    ],
+    origin: true,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],

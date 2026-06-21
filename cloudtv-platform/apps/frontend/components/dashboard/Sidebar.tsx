@@ -14,6 +14,9 @@ import {
   Settings,
   LogOut,
   ChevronRight,
+  Clapperboard,
+  Antenna,
+  ShieldCheck,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth.store';
@@ -55,12 +58,25 @@ const navItems = [
     href: '/stream',
     icon: Tv,
   },
+  {
+    label: 'Publicidad',
+    href: '/ads',
+    icon: Clapperboard,
+  },
+  {
+    label: 'Ingesta',
+    href: '/ingest',
+    icon: Antenna,
+  },
 ];
+
+const isAdminRole = (role?: string) =>
+  role === 'ADMIN' || role === 'SUPER_ADMIN';
 
 export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
-  const { user, logout } = useAuthStore();
+  const { user, logout, impersonationAdmin } = useAuthStore();
 
   const handleLogout = async () => {
     await logout();
@@ -92,6 +108,24 @@ export function Sidebar() {
 
       {/* Nav */}
       <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
+        {/* Admin link — only for admins that are NOT currently impersonating */}
+        {isAdminRole(impersonationAdmin?.user.role ?? user?.role) && !impersonationAdmin && (
+          <Link
+            href="/admin"
+            className={cn(
+              'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-150 group relative mb-1',
+              isActive('/admin')
+                ? 'bg-amber-500/20 text-amber-300'
+                : 'text-amber-500/80 hover:text-amber-300 hover:bg-amber-500/10',
+            )}
+          >
+            {isActive('/admin') && (
+              <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-amber-400 rounded-r-full" />
+            )}
+            <ShieldCheck className="w-4 h-4 flex-shrink-0" />
+            <span className="flex-1">Administración</span>
+          </Link>
+        )}
         {navItems.map(({ label, href, icon: Icon }) => (
           <Link
             key={href}
@@ -140,15 +174,26 @@ export function Sidebar() {
         </button>
 
         {/* User chip */}
-        <div className="mt-3 px-3 py-2.5 rounded-lg bg-surface-700/50 flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-full bg-brand-600 flex items-center justify-center flex-shrink-0">
+        <div className={cn(
+          'mt-3 px-3 py-2.5 rounded-lg flex items-center gap-2.5',
+          impersonationAdmin ? 'bg-amber-500/10 border border-amber-500/20' : 'bg-surface-700/50',
+        )}>
+          <div className={cn(
+            'w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0',
+            impersonationAdmin ? 'bg-amber-500' : 'bg-brand-600',
+          )}>
             <span className="text-xs font-bold text-white">
               {user?.name?.charAt(0).toUpperCase() ?? 'U'}
             </span>
           </div>
           <div className="flex-1 min-w-0">
             <p className="text-xs font-medium text-white truncate">{user?.name}</p>
-            <p className="text-xs text-slate-500 truncate">{user?.plan}</p>
+            <p className={cn(
+              'text-xs truncate',
+              impersonationAdmin ? 'text-amber-400/70' : 'text-slate-500',
+            )}>
+              {impersonationAdmin ? 'Vista impersonada' : user?.plan}
+            </p>
           </div>
         </div>
       </div>

@@ -11,6 +11,9 @@ import {
   AbortMultipartUploadCommand,
   HeadObjectCommand,
   DeleteObjectsCommand,
+  CreateBucketCommand,
+  HeadBucketCommand,
+  PutBucketPolicyCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Readable } from 'stream';
@@ -31,13 +34,17 @@ export class StorageService implements OnModuleInit {
 
   constructor(private config: ConfigService) {}
 
-  onModuleInit() {
+  private endpoint: string;
+
+  async onModuleInit() {
     const accountId = this.config.get('R2_ACCOUNT_ID');
     const endpoint =
       this.config.get('R2_ENDPOINT') ||
       (accountId
         ? `https://${accountId}.r2.cloudflarestorage.com`
         : 'http://localhost:9000');
+
+    this.endpoint = endpoint;
 
     this.s3 = new S3Client({
       region: 'auto',
@@ -60,6 +67,40 @@ export class StorageService implements OnModuleInit {
     );
 
     this.logger.log(`Storage initialized → endpoint: ${endpoint}, bucket: ${this.bucket}`);
+
+    // Crear el bucket automáticamente si no existe
+    await this.ensureBucketExists();
+  }
+
+  private async ensureBucketExists(): Promise<void> {
+    try {
+      await this.s3.send(new HeadBucketCommand({ Bucket: this.bucket }));
+      this.logger.log(`Bucket "${this.bucket}" ya existe`);
+    } catch {
+      try {
+        await this.s3.send(new CreateBucketCommand({ Bucket: this.bucket }));
+        this.logger.log(`Bucket "${this.bucket}" creado`);
+
+        // Política pública de lectura (para servir thumbnails y videos procesados)
+        const policy = JSON.stringify({
+          Version: '2012-10-17',
+          Statement: [
+            {
+              Effect: 'Allow',
+              Principal: { AWS: ['*'] },
+              Action: ['s3:GetObject'],
+              Resource: [`arn:aws:s3:::${this.bucket}/*`],
+            },
+          ],
+        });
+        await this.s3.send(
+          new PutBucketPolicyCommand({ Bucket: this.bucket, Policy: policy }),
+        );
+        this.logger.log(`Política pública aplicada al bucket "${this.bucket}"`);
+      } catch (err) {
+        this.logger.error(`No se pudo crear el bucket: ${err.message}`);
+      }
+    }
   }
 
   // ─── Upload simple (para thumbnails, logos, etc.) ────────────
@@ -205,6 +246,11 @@ export class StorageService implements OnModuleInit {
     return `${this.publicUrl.replace(/\/$/, '')}/${key}`;
   }
 
+  /** URL accesible desde dentro del contenedor (para FFmpeg) */
+  getInternalUrl(key: string): string {
+    return `${this.endpoint.replace(/\/$/, '')}/${this.bucket}/${key}`;
+  }
+
   async getPresignedUrl(key: string, expiresIn = 3600): Promise<string> {
     return getSignedUrl(
       this.s3,
@@ -225,5 +271,13 @@ export class StorageService implements OnModuleInit {
 
   buildProcessedKey(channelId: string, videoId: string): string {
     return `videos/${channelId}/${videoId}/processed.mp4`;
+  }
+
+  /**
+   * Key para la versión pre-normalizada al formato broadcast canónico.
+   * Generada en el pipeline de upload (Option B) y usada directamente por playout.
+   */
+  buildNormKey(channelId: string, videoId: string, quality: '480p' | '720p' | '1080p'): string {
+    return `videos/${channelId}/${videoId}/norm_${quality}.mp4`;
   }
 }

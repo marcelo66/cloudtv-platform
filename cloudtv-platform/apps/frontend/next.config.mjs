@@ -1,6 +1,5 @@
-import type { NextConfig } from 'next';
-
-const nextConfig: NextConfig = {
+/** @type {import('next').NextConfig} */
+const nextConfig = {
   // Necesario para el Dockerfile de producción
   output: 'standalone',
 
@@ -8,7 +7,9 @@ const nextConfig: NextConfig = {
     remotePatterns: [
       { protocol: 'https', hostname: '**.r2.dev' },
       { protocol: 'https', hostname: '**.cloudflare.com' },
+      { protocol: 'https', hostname: '**.easypanel.host' },
       { protocol: 'http', hostname: 'localhost' },
+      { protocol: 'http', hostname: 'minio' },
       { protocol: 'http', hostname: '*' },
     ],
   },

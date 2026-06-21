@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 
 datasource db {
@@ -18,13 +19,33 @@ model User {
   role         Role     @default(USER)
   plan         Plan     @default(FREE)
   isActive     Boolean  @default(true) @map("is_active")
+  maxChannels  Int?     @map("max_channels")
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
-  channels      Channel[]
-  refreshTokens RefreshToken[]
+  channels           Channel[]
+  refreshTokens      RefreshToken[]
+  youtubeCredential  YoutubeCredential?
 
   @@map("users")
+}
+
+// ─── YOUTUBE AUTH ─────────────────────────────────────────────
+// Credenciales OAuth2 de YouTube obtenidas vía Device Authorization Flow.
+// Almacena el contenido del directorio youtube-oauth2 del caché de yt-dlp
+// como JSON { [filename]: contenido } para sobrevivir reinicios del container.
+
+model YoutubeCredential {
+  id           String   @id @default(cuid())
+  userId       String   @unique @map("user_id")
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // { [filename.json]: contenido } del dir youtube-oauth2 de yt-dlp
+  tokenJson    String   @map("token_json")
+  accountEmail String?  @map("account_email")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("youtube_credentials")
 }
 
 model RefreshToken {
@@ -41,25 +62,38 @@ model RefreshToken {
 // ─── CHANNEL ─────────────────────────────────────────────────
 
 model Channel {
-  id          String        @id @default(cuid())
-  userId      String        @map("user_id")
-  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  name        String
-  slug        String        @unique
-  description String?
-  logoUrl     String?       @map("logo_url")
-  status      ChannelStatus @default(OFFLINE)
-  streamKey   String        @unique @map("stream_key") @default(cuid())
-  hlsUrl      String?       @map("hls_url")
-  createdAt   DateTime      @default(now()) @map("created_at")
-  updatedAt   DateTime      @updatedAt @map("updated_at")
+  id           String        @id @default(cuid())
+  userId       String        @map("user_id")
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name         String
+  slug         String        @unique
+  description  String?
+  logoUrl      String?       @map("logo_url")
+  status       ChannelStatus @default(OFFLINE)
+  streamKey    String        @unique @map("stream_key") @default(cuid())
+  hlsUrl       String?       @map("hls_url")
+  videoQuality      String        @default("480p") @map("video_quality")
+  // Valores: 480p | 720p | 1080p
+  // ─── Publicidad automática por intervalo ───────────────────
+  adIntervalMinutes Int?          @map("ad_interval_minutes")
+  adIntervalBlockId String?       @map("ad_interval_block_id")
+  adIntervalBlock   AdBlock?      @relation("ChannelAdInterval", fields: [adIntervalBlockId], references: [id])
+  // Playlist de relleno: se usa cuando no hay schedule activo o para cubrir gaps de programación
+  fillerPlaylistId  String?       @map("filler_playlist_id")
+  fillerPlaylist    Playlist?     @relation("ChannelFiller", fields: [fillerPlaylistId], references: [id])
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
 
-  videos     Video[]
-  playlists  Playlist[]
-  overlays   Overlay[]
-  schedules  Schedule[]
-  outputs    StreamOutput[]
-  logs       PlayoutLog[]
+  videos        Video[]
+  playlists     Playlist[]
+  overlays      Overlay[]
+  schedules     Schedule[]
+  outputs       StreamOutput[]
+  ingestSources IngestSource[]
+  logs          PlayoutLog[]
+  adBlocks      AdBlock[]
+  cuePoints     CuePoint[]
+  adImpressions AdImpression[]
 
   @@map("channels")
 }
@@ -75,6 +109,11 @@ model Video {
   status        VideoStatus @default(PENDING)
   originalKey   String      @map("original_key")
   processedKey  String?     @map("processed_key")
+  // ─── Pre-normalized broadcast-canonical versions (Option B) ──────────────
+  // Generated at upload time; playout uses these directly (stream-copy, no re-encode).
+  norm480pKey   String?     @map("norm_480p_key")
+  norm720pKey   String?     @map("norm_720p_key")
+  norm1080pKey  String?     @map("norm_1080p_key")
   thumbnailUrl  String?     @map("thumbnail_url")
   duration      Float?
   width         Int?
@@ -84,11 +123,15 @@ model Video {
   bitrate       Int?
   fileSize      BigInt      @map("file_size")
   mimeType      String      @map("mime_type")
-  tags          String[]    @default([])
+  tags               String[]    @default([])
+  folder             String?     // Carpeta organizativa (solo filtrado en frontend)
+  processingProgress Int?        @map("processing_progress") // 0-100, null cuando no está procesando
   createdAt     DateTime    @default(now()) @map("created_at")
   updatedAt     DateTime    @updatedAt @map("updated_at")
 
   playlistItems PlaylistItem[]
+  adSpots       AdSpot[]
+  cuePoints     CuePoint[]
 
   @@map("videos")
 }
@@ -107,8 +150,10 @@ model Playlist {
   createdAt     DateTime       @default(now()) @map("created_at")
   updatedAt     DateTime       @updatedAt @map("updated_at")
 
-  items     PlaylistItem[]
-  schedules Schedule[]
+  items          PlaylistItem[]
+  schedules      Schedule[]
+  channelFillers Channel[]  @relation("ChannelFiller")
+  scheduleFills  Schedule[] @relation("ScheduleFiller")
 
   @@map("playlists")
 }
@@ -118,7 +163,7 @@ model PlaylistItem {
   playlistId String   @map("playlist_id")
   playlist   Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
   videoId    String   @map("video_id")
-  video      Video    @relation(fields: [videoId], references: [id])
+  video      Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
   order      Int
   trimStart  Float?   @map("trim_start")
   trimEnd    Float?   @map("trim_end")
@@ -139,9 +184,17 @@ model Schedule {
   name       String
   startTime  DateTime   @map("start_time")
   endTime    DateTime   @map("end_time")
-  recurrence Recurrence @default(ONCE)
-  priority   Int        @default(0)
-  createdAt  DateTime   @default(now()) @map("created_at")
+  recurrence    Recurrence @default(ONCE)
+  priority      Int        @default(0)
+  // ─── Tandas ancladas al programa ───────────────────────────
+  preAdBlockId  String?    @map("pre_ad_block_id")
+  postAdBlockId String?    @map("post_ad_block_id")
+  preAdBlock    AdBlock?   @relation("SchedulePreAd",  fields: [preAdBlockId],  references: [id])
+  postAdBlock   AdBlock?   @relation("SchedulePostAd", fields: [postAdBlockId], references: [id])
+  // Playlist de relleno: si el contenido del slot es más corto que su duración, completa con esta playlist
+  fillerPlaylistId  String?    @map("filler_playlist_id")
+  fillerPlaylist    Playlist?  @relation("ScheduleFiller", fields: [fillerPlaylistId], references: [id])
+  createdAt     DateTime   @default(now()) @map("created_at")
 
   @@map("schedules")
 }
@@ -171,14 +224,137 @@ model StreamOutput {
   channel   Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
   name      String
   platform  Platform
-  rtmpUrl   String       @map("rtmp_url")
-  streamKey String       @map("stream_key")
+  // RTMP: URL base del servidor. SRT_CALLER: host/IP de destino. SRT_LISTENER: ignorado.
+  rtmpUrl   String       @default("") @map("rtmp_url")
+  // RTMP: stream key. SRT: no se usa (vacío).
+  streamKey String       @default("") @map("stream_key")
   enabled   Boolean      @default(true)
   status    OutputStatus @default(IDLE)
+  // ── Campos exclusivos SRT ────────────────────────────────────────────────
+  srtPort       Int?    @map("srt_port")       // Puerto SRT (default: 9001)
+  srtLatency    Int?    @map("srt_latency")     // Latencia en milisegundos (default: 120 ms)
+  srtPassphrase String? @map("srt_passphrase")  // Passphrase de cifrado AES (10-79 chars, opcional)
+  // ── Calidad de emisión por salida ─────────────────────────────────────────
+  customBitrate Int?    @map("custom_bitrate")  // kbps de video (null = stream-copy desde HLS)
+  customQuality String? @map("custom_quality")  // "480p" | "720p" | "1080p" (null = heredar del canal)
   createdAt DateTime     @default(now()) @map("created_at")
   updatedAt DateTime     @updatedAt @map("updated_at")
 
   @@map("stream_outputs")
+}
+
+// ─── INGEST SOURCES ──────────────────────────────────────────
+// Fuentes de ingesta: reemplazan la programación normal para transmitir
+// eventos en vivo (YouTube, SRT, RTMP entrante).
+
+model IngestSource {
+  id        String       @id @default(cuid())
+  channelId String       @map("channel_id")
+  channel   Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  name      String
+  type      IngestType
+  // Dependiendo del tipo:
+  //   YOUTUBE:      URL completa de YouTube Watch/Live
+  //   SRT_CALLER:   "host:port" al que conectarse (ej: "10.10.0.5:9002")
+  //   SRT_LISTENER: vacío — escucha en srtPort
+  //   RTMP_PUSH:    vacío — escucha en rtmpPort con rtmpKey
+  url           String   @default("")
+  // SRT
+  srtPort       Int?     @map("srt_port")
+  srtLatency    Int?     @map("srt_latency")
+  srtPassphrase String?  @map("srt_passphrase")
+  // SRT Stream ID — para servidores que enrutan por stream ID (ej: Haivision, SRT Hub)
+  srtStreamId   String?  @map("srt_stream_id")
+  // RTMP (Push entrante o Pull desde fuente externa)
+  rtmpHost      String?  @map("rtmp_host")   // Host/IP del servidor RTMP remoto. Vacío = escucha push entrante (encoder conecta al servidor). Con valor = pull (el servidor conecta a la fuente externa).
+  rtmpPort      Int?     @map("rtmp_port")   // Puerto RTMP (default 1935)
+  rtmpApp       String?  @map("rtmp_app")    // Nombre de app RTMP (default "live")
+  rtmpKey       String?  @map("rtmp_key")    // Stream key (opcional)
+  // Estado actual
+  status    IngestStatus @default(IDLE)
+  createdAt DateTime     @default(now()) @map("created_at")
+  updatedAt DateTime     @updatedAt @map("updated_at")
+
+  @@map("ingest_sources")
+}
+
+// ─── AD BREAKS (Tandas Publicitarias) ────────────────────────
+
+model AdBlock {
+  id            String       @id @default(cuid())
+  channelId     String       @map("channel_id")
+  channel       Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  name          String
+  description   String?
+  rotationMode  RotationMode @default(SEQUENTIAL) @map("rotation_mode")
+  sequenceIndex Int          @default(0) @map("sequence_index")
+  isActive         Boolean  @default(true)  @map("is_active")
+  suppressOverlays Boolean  @default(false) @map("suppress_overlays") // Oculta logo/hora/etc. durante esta tanda
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt      @map("updated_at")
+
+  spots       AdSpot[]
+  cuePoints   CuePoint[]
+  impressions AdImpression[]
+  // Reverse relations para intervalo de canal y tandas de programa
+  intervalChannels Channel[]   @relation("ChannelAdInterval")
+  preSchedules     Schedule[]  @relation("SchedulePreAd")
+  postSchedules    Schedule[]  @relation("SchedulePostAd")
+
+  @@map("ad_blocks")
+}
+
+model AdSpot {
+  id         String   @id @default(cuid())
+  adBlockId  String   @map("ad_block_id")
+  adBlock    AdBlock  @relation(fields: [adBlockId], references: [id], onDelete: Cascade)
+  videoId    String   @map("video_id")
+  video      Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  name       String
+  advertiser String
+  weight     Int      @default(1)
+  order      Int      @default(0)
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  impressions AdImpression[]
+
+  @@map("ad_spots")
+}
+
+model CuePoint {
+  id         String       @id @default(cuid())
+  channelId  String       @map("channel_id")
+  channel    Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  videoId    String       @map("video_id")
+  video      Video        @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  adBlockId  String       @map("ad_block_id")
+  adBlock    AdBlock      @relation(fields: [adBlockId], references: [id], onDelete: Cascade)
+  type       CuePointType
+  timeOffset Float?       @map("time_offset")
+  isActive   Boolean      @default(true) @map("is_active")
+  label      String?      // Etiqueta descriptiva opcional
+  createdAt  DateTime     @default(now()) @map("created_at")
+  updatedAt  DateTime     @updatedAt @map("updated_at")
+
+  @@map("cue_points")
+}
+
+model AdImpression {
+  id          String       @id @default(cuid())
+  adSpotId    String       @map("ad_spot_id")
+  adSpot      AdSpot       @relation(fields: [adSpotId], references: [id], onDelete: Cascade)
+  adBlockId   String       @map("ad_block_id")
+  adBlock     AdBlock      @relation(fields: [adBlockId], references: [id], onDelete: Cascade)
+  channelId   String       @map("channel_id")
+  channel     Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  advertiser  String
+  type        CuePointType
+  duration    Float?
+  scheduledAt DateTime     @default(now()) @map("scheduled_at")
+
+  @@map("ad_impressions")
 }
 
 // ─── PLAYOUT LOGS ─────────────────────────────────────────────
@@ -245,6 +421,20 @@ enum OverlayType {
   TEXT_SCROLL
   CLOCK
   TICKER
+  TEMPERATURE
+}
+
+enum IngestType {
+  YOUTUBE      // Fuente YouTube live (requiere yt-dlp instalado)
+  SRT_CALLER   // Conectarse a una fuente SRT remota (cliente con ZeroTier u otro)
+  SRT_LISTENER // Escuchar conexiones SRT entrantes en un puerto local
+  RTMP_PUSH    // Recibir RTMP push de un encoder (OBS, vMix, etc.)
+}
+
+enum IngestStatus {
+  IDLE    // No activo
+  ACTIVE  // El playout está usando esta fuente como señal en vivo
+  ERROR   // El proceso FFmpeg terminó con error
 }
 
 enum Platform {
@@ -252,10 +442,24 @@ enum Platform {
   FACEBOOK
   TWITCH
   RTMP_CUSTOM
+  SRT_CALLER    // Enviar SRT a un destino conocido (cablera, encoder remoto, peer ZeroTier)
+  SRT_LISTENER  // Escuchar conexiones SRT entrantes en un puerto local
 }
 
 enum OutputStatus {
   IDLE
   STREAMING
   ERROR
+}
+
+enum RotationMode {
+  SEQUENTIAL
+  RANDOM
+  WEIGHTED
+}
+
+enum CuePointType {
+  PRE_ROLL
+  MID_ROLL
+  POST_ROLL
 }
