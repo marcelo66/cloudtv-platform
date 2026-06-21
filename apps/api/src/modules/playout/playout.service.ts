@@ -1601,14 +1601,14 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         const text    = this.escapeText(cfg.text ?? '');
         const barH    = cfg.barHeight ?? 36;
         const isBot   = (cfg.position ?? 'bottom') !== 'top';
-        const barY    = isBot ? `H-${barH}` : '0';
+        const barY    = isBot ? `ih-${barH}` : '0';  // drawbox usa ih/iw, no H/W
         const textY   = isBot ? `H-${barH}+(${barH}-text_h)/2` : `(${barH}-text_h)/2`;
         // Fórmula: el texto arranca en el borde derecho y avanza speed px/s
         // mod(...) garantiza que reinicia el ciclo al llegar al extremo izquierdo
         const scrollX = `W-mod(t*${cfg.speed ?? 80}\\,W+text_w)`;
         const barLabel = `bar${idx}`;
         filterParts.push(withEnable(
-          `[${currentStream}]drawbox=x=0:y=${barY}:w=W:h=${barH}:color=${cfg.bgColor ?? 'black@0.7'}:t=fill`,
+          `[${currentStream}]drawbox=x=0:y=${barY}:w=iw:h=${barH}:color=${cfg.bgColor ?? 'black@0.7'}:t=fill`,
         ) + `[${barLabel}]`);
         filterParts.push(withEnable(
           `[${barLabel}]drawtext=fontfile=${FONT}:text=${text}:fontsize=${cfg.fontSize ?? 20}:fontcolor=${cfg.fontColor ?? 'white'}:x=${scrollX}:y=${textY}:fix_bounds=1`,
