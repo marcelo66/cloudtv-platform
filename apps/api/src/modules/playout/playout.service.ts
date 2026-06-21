@@ -43,6 +43,8 @@ interface PlayoutSession {
   scheduleWatchTimer: ReturnType<typeof setTimeout> | null;
   /** Timer de refresco periódico de temperatura (TEMPERATURE overlays) */
   tempRefreshTimer: ReturnType<typeof setTimeout> | null;
+  /** Timer de refresco periódico de RSS (TICKER overlays con textSource='rss') */
+  rssRefreshTimer: ReturnType<typeof setTimeout> | null;
   /** true → runBackgroundNormalization está activo; no lanzar una segunda instancia */
   bgNormRunning: boolean;
   /** Timer del watchdog de segmentos HLS (detecta FFmpeg estancado) */
@@ -167,6 +169,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       scheduleChangePending: false,
       scheduleWatchTimer: null,
       tempRefreshTimer: null,
+      rssRefreshTimer: null,
       bgNormRunning: false,
       segmentWatchTimer: null,
       activeIngestId: null,
@@ -235,6 +238,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       if (session.tempRefreshTimer) {
         clearTimeout(session.tempRefreshTimer);
         session.tempRefreshTimer = null;
+      }
+      // Cancelar timer de refresco de RSS ticker
+      if (session.rssRefreshTimer) {
+        clearTimeout(session.rssRefreshTimer);
+        session.rssRefreshTimer = null;
       }
       // Matar proceso de ingesta si existe
       if (session.ytDlpProcess && !session.ytDlpProcess.killed) {
@@ -940,8 +948,25 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       if (ov.type === OverlayType.TEMPERATURE) {
         await this.writeTempFile(session, ov);
       }
+      if (ov.type === OverlayType.TICKER || ov.type === OverlayType.TEXT_SCROLL) {
+        const cfg = ov.config as any;
+        const tickerFile = `/tmp/cloudtv-ticker-${session.channelId}-${ov.id}.txt`;
+        if (cfg.textSource === 'rss' && cfg.rssUrl) {
+          try {
+            const text = await this.fetchRssFeed(cfg.rssUrl, cfg.rssItems ?? 5);
+            await fs.writeFile(tickerFile, text, 'utf8');
+            this.log(session, `✓ [rss] Feed cargado (${(cfg.rssItems ?? 5)} noticias): ${text.slice(0, 60)}…`);
+          } catch (e: any) {
+            this.log(session, `WARN: [rss] No se pudo obtener feed, usando texto de respaldo: ${e.message}`);
+            await fs.writeFile(tickerFile, cfg.text ?? '', 'utf8').catch(() => {});
+          }
+        } else {
+          await fs.writeFile(tickerFile, cfg.text ?? '', 'utf8').catch(() => {});
+        }
+      }
     }
     this.startTempRefresh(session, effectiveOvs);
+    this.startRssRefresh(session, effectiveOvs);
 
     // 6. FFmpeg HLS — encode único desde MP4 originales, sin pre-normalización
     const m3u8Path = path.join(session.hlsDir, 'index.m3u8');
@@ -1610,9 +1635,8 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         // scrollX: el texto entra por el borde derecho (W) y sale por la izquierda (-text_w)
         // SIN fix_bounds — el texto DEBE poder salirse de pantalla para que el scroll sea visible
         const scrollX = `W-mod(t*${cfg.speed ?? 80}\\,W+text_w)`;
-        // Usar textfile para evitar problemas de escape con texto largo/complejo
+        // Archivo ya escrito en pre-flight (writeTempFile/fetchRssFeed antes de arrancar FFmpeg)
         const tickerFile = `/tmp/cloudtv-ticker-${session.channelId}-${ov.id}.txt`;
-        await fs.writeFile(tickerFile, cfg.text ?? '', 'utf8').catch(() => {});
         const barLabel = `bar${idx}`;
         filterParts.push(withEnable(
           `[${currentStream}]drawbox=x=${barX}:y=${barY}:w=${barW}:h=${barH}:color=${cfg.bgColor ?? 'black@0.7'}:t=fill`,
@@ -1779,6 +1803,77 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     };
 
     session.tempRefreshTimer = setTimeout(refresh, REFRESH_MS);
+  }
+
+  // ─── RSS ticker refresh ────────────────────────────────────────
+
+  /** Descarga y parsea un feed RSS/Atom, devuelve los títulos unidos por separador. */
+  private async fetchRssFeed(url: string, maxItems: number): Promise<string> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12_000);
+    try {
+      const resp = await fetch(url, { signal: controller.signal });
+      clearTimeout(timer);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const xml = await resp.text();
+
+      // Captura títulos de RSS 2.0 (<item>) y Atom (<entry>)
+      // Soporta texto plano, CDATA y entidades HTML básicas
+      const titles: string[] = [];
+      const re = /<(?:item|entry)[\s>][\s\S]*?<title[^>]*>(?:<!\[CDATA\[)?\s*([\s\S]*?)\s*(?:\]\]>)?<\/title>/gi;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(xml)) !== null && titles.length < maxItems) {
+        const title = m[1]
+          .replace(/&amp;/g,  '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#39;/g, "'")
+          .replace(/<[^>]+>/g, '')   // quitar tags anidados
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (title) titles.push(title);
+      }
+      if (titles.length === 0) throw new Error('No se encontraron títulos en el feed');
+      return titles.join('   ●   ');
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Inicia refresh periódico del ticker RSS. Se llama tras cada launchFfmpeg. */
+  private startRssRefresh(session: PlayoutSession, enabledOverlays: Overlay[]): void {
+    if (session.rssRefreshTimer) {
+      clearTimeout(session.rssRefreshTimer);
+      session.rssRefreshTimer = null;
+    }
+
+    const rssOvs = enabledOverlays.filter(o =>
+      (o.type === OverlayType.TICKER || o.type === OverlayType.TEXT_SCROLL) &&
+      (o.config as any).textSource === 'rss' && (o.config as any).rssUrl,
+    );
+    if (rssOvs.length === 0) return;
+
+    // Usa el menor intervalo configurado entre todos los tickers RSS (mín. 5 min)
+    const minMin = rssOvs.reduce((min, o) => Math.min(min, (o.config as any).rssRefreshMin ?? 10), 60);
+    const REFRESH_MS = Math.max(5, minMin) * 60_000;
+
+    const refresh = async () => {
+      if (session.stopping || !this.sessions.has(session.channelId)) return;
+      for (const ov of rssOvs) {
+        const cfg = ov.config as any;
+        const tickerFile = `/tmp/cloudtv-ticker-${session.channelId}-${ov.id}.txt`;
+        try {
+          const text = await this.fetchRssFeed(cfg.rssUrl, cfg.rssItems ?? 5);
+          await fs.writeFile(tickerFile, text, 'utf8');
+          this.log(session, `✓ [rss] Ticker refrescado: ${text.slice(0, 50)}…`);
+        } catch (e: any) {
+          this.log(session, `WARN: [rss] Error refrescando ticker: ${e.message}`);
+        }
+      }
+      if (!session.stopping && this.sessions.has(session.channelId)) {
+        session.rssRefreshTimer = setTimeout(refresh, REFRESH_MS);
+      }
+    };
+
+    session.rssRefreshTimer = setTimeout(refresh, REFRESH_MS);
   }
 
   // ─── Log helper ────────────────────────────────────────────────

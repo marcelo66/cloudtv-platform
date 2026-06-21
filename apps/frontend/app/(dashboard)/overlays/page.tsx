@@ -181,9 +181,9 @@ function OffsetInputs({
 const DEFAULT_CONFIG: Record<OverlayType, Record<string, any>> = {
   LOGO:        { position: 'top-left', width: 120, opacity: 1, offsetX: 0, offsetY: 0 },
   TEXT_STATIC: { text: '', position: 'bottom-right', fontSize: 24, fontColor: 'white', bgColor: 'black@0.5', bold: false, offsetX: 0, offsetY: 0 },
-  TEXT_SCROLL: { text: '', position: 'bottom', fontSize: 20, fontColor: 'white', bgColor: 'black@0.7', speed: 80, barHeight: 36, offsetX: 0, offsetY: 0 },
+  TEXT_SCROLL: { textSource: 'manual', text: '', rssUrl: '', rssItems: 5, rssRefreshMin: 10, position: 'bottom', fontSize: 20, fontColor: 'white', bgColor: 'black@0.7', speed: 80, barHeight: 36, offsetX: 0, offsetY: 0 },
   CLOCK:       { position: 'top-right', fontSize: 28, fontColor: 'white', bgColor: 'black@0.6', format: 'time_short', timezone: 'America/Argentina/Buenos_Aires', offsetX: 0, offsetY: 0 },
-  TICKER:      { text: '', position: 'bottom', fontSize: 20, fontColor: 'white', bgColor: 'black@0.7', speed: 80, barHeight: 36, offsetX: 0, offsetY: 0 },
+  TICKER:      { textSource: 'manual', text: '', rssUrl: '', rssItems: 5, rssRefreshMin: 10, position: 'bottom', fontSize: 20, fontColor: 'white', bgColor: 'black@0.7', speed: 80, barHeight: 36, offsetX: 0, offsetY: 0 },
   TEMPERATURE: { city: 'Buenos Aires', unit: 'celsius', showUnit: true, position: 'top-right', fontSize: 28, fontColor: 'white', bgColor: 'black@0.6', offsetX: 0, offsetY: 0 },
 };
 
@@ -216,7 +216,9 @@ function OverlayCard({
         return `"${(cfg.text ?? '').slice(0, 40)}" · ${cfg.position ?? 'top-left'} · ${cfg.fontSize ?? 24}px`;
       case 'TEXT_SCROLL':
       case 'TICKER':
-        return `"${(cfg.text ?? '').slice(0, 40)}" · ${cfg.speed ?? 80}px/s · ${cfg.position ?? 'bottom'}`;
+        return cfg.textSource === 'rss'
+          ? `RSS · ${cfg.rssItems ?? 5} noticias · ${cfg.speed ?? 80}px/s · ${cfg.position ?? 'bottom'}`
+          : `"${(cfg.text ?? '').slice(0, 40)}" · ${cfg.speed ?? 80}px/s · ${cfg.position ?? 'bottom'}`;
       case 'CLOCK': {
         const fmtLabel = cfg.format === 'datetime' ? 'Fecha+hora' : cfg.format === 'time' ? 'HH:MM:SS' : 'HH:MM';
         const tz = cfg.timezone ? (cfg.timezone as string).split('/').pop() : '';
@@ -593,12 +595,74 @@ function OverlayFormModal({
           {/* ── TEXT_SCROLL / TICKER ── */}
           {(effectiveType === 'TEXT_SCROLL' || effectiveType === 'TICKER') && (
             <div className="space-y-3">
+
+              {/* Fuente del texto */}
               <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">Texto</label>
-                <textarea value={config.text ?? ''} onChange={e => setCfg('text', e.target.value)}
-                  rows={2} placeholder="Texto que scrolleará de derecha a izquierda"
-                  className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 resize-none" />
+                <label className="block text-xs font-medium text-slate-400 mb-1.5">Fuente del texto</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {(['manual', 'rss'] as const).map(src => (
+                    <button
+                      key={src}
+                      type="button"
+                      onClick={() => setCfg('textSource', src)}
+                      className={cn(
+                        'py-2 rounded-lg border text-xs font-medium transition-all',
+                        (config.textSource ?? 'manual') === src
+                          ? 'border-brand-500 bg-brand-500/10 text-white'
+                          : 'border-surface-600 bg-surface-700 text-slate-400 hover:border-surface-500 hover:text-white',
+                      )}
+                    >
+                      {src === 'manual' ? 'Texto manual' : 'RSS / Feed URL'}
+                    </button>
+                  ))}
+                </div>
               </div>
+
+              {/* Texto manual */}
+              {(config.textSource ?? 'manual') === 'manual' && (
+                <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Texto</label>
+                  <textarea value={config.text ?? ''} onChange={e => setCfg('text', e.target.value)}
+                    rows={2} placeholder="Texto que scrolleará de derecha a izquierda"
+                    className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 resize-none" />
+                </div>
+              )}
+
+              {/* RSS / Feed */}
+              {(config.textSource ?? 'manual') === 'rss' && (
+                <div className="space-y-2">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-400 mb-1">URL del feed RSS / Atom</label>
+                    <input
+                      value={config.rssUrl ?? ''}
+                      onChange={e => setCfg('rssUrl', e.target.value)}
+                      placeholder="https://www.lanacion.com.ar/arcio/rss/"
+                      className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-xs text-slate-400 mb-1">N° de noticias</label>
+                      <input type="number" min={1} max={20} value={config.rssItems ?? 5}
+                        onChange={e => setCfg('rssItems', +e.target.value)}
+                        className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-slate-400 mb-1">Actualizar cada (min)</label>
+                      <input type="number" min={5} max={120} value={config.rssRefreshMin ?? 10}
+                        onChange={e => setCfg('rssRefreshMin', +e.target.value)}
+                        className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-400 mb-1">Texto de respaldo (si el feed falla)</label>
+                    <input value={config.text ?? ''} onChange={e => setCfg('text', e.target.value)}
+                      placeholder="Texto que se muestra si el RSS no responde"
+                      className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500" />
+                  </div>
+                </div>
+              )}
+
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-xs text-slate-400 mb-1">Posición</label>
