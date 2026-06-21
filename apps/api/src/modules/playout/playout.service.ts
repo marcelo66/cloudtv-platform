@@ -291,6 +291,25 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     if (session.stopping) return;
     if (session.activeIngestId) return; // ingesta activa — no reiniciar playlist
 
+    // Limpiar segmentos y playlist HLS de la sesión anterior.
+    //
+    // Con hls_start_number_source=epoch, los números de segmento son timestamps Unix.
+    // Si el proceso RTMP reconecta y el nuevo m3u8 tiene números ~337 más altos (porque
+    // la sesión anterior duró 11 min → 330 segmentos), el HLS demuxer reporta
+    // "skipping 337 segments ahead" y puede decodificar paquetes corruptos.
+    //
+    // Solución: borrar index.m3u8 y seg*.ts antes de que el nuevo FFmpeg arranque.
+    // El waitForM3u8 espera a que el NUEVO index.m3u8 aparezca, por lo que RTMP
+    // solo arranca cuando el nuevo HLS ya tiene segmentos frescos listos.
+    try {
+      const staleFiles = await fs.readdir(session.hlsDir).catch(() => [] as string[]);
+      await Promise.all(
+        staleFiles
+          .filter(f => f === 'index.m3u8' || f.startsWith('seg') && f.endsWith('.ts'))
+          .map(f => fs.unlink(path.join(session.hlsDir, f)).catch(() => {})),
+      );
+    } catch { /* no crítico */ }
+
     // Cancelar cualquier waitForM3u8 anterior
     session.pollToken++;
     const myPollToken = session.pollToken;
@@ -928,6 +947,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       '-hls_start_number_source', 'epoch',
       '-hls_segment_type', 'mpegts',
       '-hls_segment_filename', 'seg%d.ts',
+      // Permite que el muxer HLS emita paquetes aunque lleguen ligeramente fuera de
+      // orden en el tiempo. Sin esto, pequeñas discontinuidades de DTS en la
+      // transición entre clips del concat disparan "Non-monotonous DTS" warnings y
+      // pueden hacer que el muxer descarte paquetes de audio.
+      '-max_interleave_delta', '0',
       '-y', 'index.m3u8',
     ];
 
@@ -941,9 +965,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     ];
 
     // Filtro de audio (decode+encode paths — overlays o re-encode de raw).
-    // aresample async=1000 compensa micro-drifts de pts entre clips concatenados.
-    // aformat convierte cualquier layout (mono, 5.1…) a estéreo.
-    const audioFilter = 'aformat=channel_layouts=stereo,aresample=async=1000';
+    // aresample async=10000: compensa hasta ±111ms de drift de PTS en transiciones
+    // entre clips del concat (aumentado desde 1000 para evitar "Queue input is
+    // backward in time" cuando un raw file tiene timestamps ligeramente irregulares).
+    // aformat: convierte cualquier layout (mono, 5.1…) a estéreo antes del encoder.
+    const audioFilter = 'aformat=channel_layouts=stereo,aresample=async=10000';
 
     // Para el camino con overlays: el audio se incluye dentro del mismo filter_complex
     const finalFilterComplex = overlayFilter
