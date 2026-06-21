@@ -1140,10 +1140,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
     // Detector rápido de fallo total de decode H.264 (ocurre al transicionar a raw MP4
     // con moov al final: el concat demuxer no puede re-inicializar el decoder → stall).
-    // Si vemos el error repetido >10 veces en 4s, matamos FFmpeg sin esperar los 25s
-    // del watchdog de segmentos → reduce el corte de 25s a ~2-3s.
+    // "No start code is found" NUNCA es benigno en playback normal → 2 ocurrencias en
+    // 4s = fallo confirmado → matar FFmpeg de inmediato (evita esperar 25s del watchdog).
     let h264ErrCount = 0;
     let h264ErrResetTimer: ReturnType<typeof setTimeout> | null = null;
+    let h264Killing = false;
 
     proc.stderr.on('data', (chunk: Buffer) => {
       chunk.toString().split('\n').forEach(l => {
@@ -1160,8 +1161,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           if (!h264ErrResetTimer) {
             h264ErrResetTimer = setTimeout(() => { h264ErrCount = 0; h264ErrResetTimer = null; }, 4_000);
           }
-          if (h264ErrCount > 12 && !session.stopping && session.process === proc) {
-            this.log(session, 'WARN: H.264 decode falló repetidamente → reiniciando FFmpeg (evita esperar 25s watchdog)');
+          if (h264ErrCount >= 2 && !h264Killing && !session.stopping && session.process === proc) {
+            h264Killing = true;
+            this.log(session, 'WARN: H.264 decode falló (NAL sin start code) → reiniciando FFmpeg inmediatamente');
             try { proc.kill('SIGTERM'); } catch { /* ok */ }
           }
         }
