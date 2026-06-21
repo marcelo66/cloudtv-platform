@@ -275,6 +275,42 @@ export class VideosService {
     return { queued, alreadyReady: total - videos.length };
   }
 
+  async renormalizeVideo(userId: string, videoId: string): Promise<{ queued: boolean }> {
+    const video = await this.findOne(userId, videoId);
+    if (video.status === 'PROCESSING') {
+      throw new BadRequestException('El video ya está siendo procesado');
+    }
+    if (!video.originalKey) {
+      throw new BadRequestException('El video no tiene archivo original disponible');
+    }
+
+    // Limpiar las norm keys para forzar re-normalización desde el original
+    await this.prisma.video.update({
+      where: { id: videoId },
+      data: {
+        norm480pKey:         null,
+        norm720pKey:         null,
+        norm1080pKey:        null,
+        status:              'PROCESSING',
+        processingProgress:  0,
+      },
+    });
+
+    await this.videoQueue.add(
+      'renormalize-video',
+      { videoId, channelId: video.channelId, originalKey: video.originalKey } as VideoProcessingJobData,
+      {
+        attempts: 2,
+        backoff: { type: 'exponential', delay: 5000 },
+        removeOnComplete: { age: 86400 },
+        removeOnFail:     { age: 604800 },
+      },
+    );
+
+    this.logger.log(`Queued video ${videoId} for forced renormalization`);
+    return { queued: true };
+  }
+
   async remove(userId: string, videoId: string) {
     const video = await this.findOne(userId, videoId);
 

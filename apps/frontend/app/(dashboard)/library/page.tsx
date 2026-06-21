@@ -6,7 +6,7 @@ import { Film, Upload, Search, Grid3X3, List, RefreshCw, Folder, FolderOpen, Zap
 import { Header } from '@/components/dashboard/Header';
 import { VideoCard } from '@/components/library/VideoCard';
 import { VideoStatusBadge } from '@/components/library/VideoStatusBadge';
-import { useVideos, useUpdateVideo, useDeleteVideo, usePrenormalizeVideos } from '@/hooks/useVideos';
+import { useVideos, useUpdateVideo, useDeleteVideo, usePrenormalizeVideos, useRenormalizeVideo } from '@/hooks/useVideos';
 import apiClient from '@/lib/api-client';
 import { formatDuration, formatBytes } from '@/lib/utils';
 import { cn } from '@/lib/utils';
@@ -29,6 +29,7 @@ export default function LibraryPage() {
   const updateVideo = useUpdateVideo();
   const deleteVideo = useDeleteVideo();
   const prenormalize = usePrenormalizeVideos();
+  const renormalize = useRenormalizeVideo();
 
   // Carpetas únicas derivadas de los videos
   const folders = useMemo(() => {
@@ -227,6 +228,7 @@ export default function LibraryPage() {
                 folders={folders}
                 onUpdate={handleUpdate}
                 onDelete={handleDelete}
+                onRenormalize={(id) => renormalize.mutate(id)}
               />
             ))}
           </div>

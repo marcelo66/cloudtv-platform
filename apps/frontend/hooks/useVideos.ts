@@ -86,6 +86,22 @@ export function usePrenormalizeVideos() {
   });
 }
 
+export function useRenormalizeVideo() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (videoId: string) =>
+      apiClient.post<{ queued: boolean }>(`/videos/${videoId}/renormalize`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['videos'] });
+      toast.success('Re-normalización encolada — el video quedará listo en minutos');
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.message ?? 'Error al re-normalizar';
+      toast.error(Array.isArray(msg) ? msg[0] : msg);
+    },
+  });
+}
+
 export function useDeleteVideo() {
   const queryClient = useQueryClient();
 

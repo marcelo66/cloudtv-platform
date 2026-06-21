@@ -139,6 +139,15 @@ export class VideosController {
     return this.videosService.update(userId, id, dto);
   }
 
+  @Post(':id/renormalize')
+  @ApiOperation({ summary: 'Forzar re-normalización de un video (limpia las prenorm keys y re-encola el job)' })
+  renormalize(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+  ) {
+    return this.videosService.renormalizeVideo(userId, id);
+  }
+
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Eliminar video y archivos en storage' })

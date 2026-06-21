@@ -105,10 +105,11 @@ export class VideoProcessor extends WorkerHost {
       await this.prisma.video.update({
         where: { id: videoId },
         data: {
-          norm480pKey:  normKeyMap['480p'],
-          norm720pKey:  normKeyMap['720p'],
-          norm1080pKey: normKeyMap['1080p'],
-          processedKey: normKeyMap['720p'],
+          norm480pKey:        normKeyMap['480p'],
+          norm720pKey:        normKeyMap['720p'],
+          norm1080pKey:       normKeyMap['1080p'],
+          processedKey:       normKeyMap['720p'],
+          status:             'READY',
           processingProgress: null,
         },
       });
@@ -117,7 +118,10 @@ export class VideoProcessor extends WorkerHost {
       this.logger.log(`✓ Re-normalization complete for video ${videoId}`);
     } catch (error) {
       this.logger.error(`✗ Re-normalization failed for ${videoId}: ${error.message}`, error.stack);
-      this.prisma.video.update({ where: { id: videoId }, data: { processingProgress: null } }).catch(() => {});
+      this.prisma.video.update({
+        where: { id: videoId },
+        data: { status: 'ERROR', processingProgress: null },
+      }).catch(() => {});
       throw error;
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});

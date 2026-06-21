@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import Image from 'next/image';
-import { MoreHorizontal, Pencil, Trash2, Film, Check, X, Folder, FolderInput } from 'lucide-react';
+import { MoreHorizontal, Pencil, Trash2, Film, Check, X, Folder, FolderInput, RefreshCw } from 'lucide-react';
 import { Video } from '@/hooks/useVideos';
 import { VideoStatusBadge } from './VideoStatusBadge';
 import { formatDuration, formatBytes } from '@/lib/utils';
@@ -13,9 +13,10 @@ interface VideoCardProps {
   folders?: string[]; // carpetas existentes para el selector
   onUpdate: (id: string, data: { title?: string; folder?: string | null }) => void;
   onDelete: (id: string) => void;
+  onRenormalize?: (id: string) => void;
 }
 
-export function VideoCard({ video, folders = [], onUpdate, onDelete }: VideoCardProps) {
+export function VideoCard({ video, folders = [], onUpdate, onDelete, onRenormalize }: VideoCardProps) {
   const [menuOpen, setMenuOpen] = useState(false);
 
   // ── Edición de título ──────────────────────────────────────
@@ -184,6 +185,15 @@ export function VideoCard({ video, folders = [], onUpdate, onDelete }: VideoCard
                     <FolderInput className="w-3.5 h-3.5" />
                     Mover a carpeta
                   </button>
+                  {onRenormalize && (video.status === 'READY' || video.status === 'ERROR') && (
+                    <button
+                      onClick={() => { onRenormalize(video.id); setMenuOpen(false); }}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-300 hover:bg-white/5 hover:text-white transition-colors"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      Re-normalizar
+                    </button>
+                  )}
                   <button
                     onClick={() => { onDelete(video.id); setMenuOpen(false); }}
                     className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 transition-colors"

@@ -139,6 +139,10 @@ export class FfmpegService {
       '-profile:v',    'high',
       '-level:v',      '4.0',
       // ─── Audio ────────────────────────────────────────────────
+      // aformat fuerza cualquier layout (mono, 5.1, 7.1, HE-AACv2…) a estéreo
+      // antes del encoder; sin esto, fuentes con channel elements complejos
+      // pueden producir AAC con headers inválidos pese al -ac 2.
+      '-af', 'aformat=channel_layouts=stereo',
       '-c:a', 'aac',
       '-ar',  '44100',
       '-ac',  '2',
