@@ -54,6 +54,13 @@ interface PlayoutSession {
   ingestProcess: ChildProcess | null;
   /** Proceso yt-dlp activo (solo para tipo YOUTUBE, piped a ingestProcess) */
   ytDlpProcess: ChildProcess | null;
+  /**
+   * Marca de tiempo (ms) cuando el HLS entró en LIVE_PLAYLIST por primera vez
+   * en esta sesión de canal. Se preserva entre reinicios de FFmpeg para calcular
+   * la posición correcta de reanudación con `inpoint` o `-ss`.
+   * null = canal recién arrancado, aún no ha emitido ni un segmento.
+   */
+  contentStartedAt: number | null;
 }
 
 const HLS_BASE    = path.join('/tmp', 'cloudtv-hls');
@@ -165,6 +172,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       activeIngestId: null,
       ingestProcess: null,
       ytDlpProcess: null,
+      contentStartedAt: null,
     };
     this.sessions.set(channelId, session);
 
@@ -751,6 +759,44 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
+    // ── Reanudación por horario: calcular posición correcta en el ciclo ─────────
+    //
+    // Cuando FFmpeg reinicia (stall, schedule-change, crash), la emisión debe
+    // continuar donde le corresponde según el reloj del canal, no desde el
+    // principio del playlist.
+    //
+    // Ancla (por prioridad):
+    //   1. scheduleEntry.startTime — hay un programa activo con hora conocida
+    //   2. session.contentStartedAt — el canal lleva emitiendo desde esa marca
+    //   3. Sin ancla (primer arranque) → seek = 0, inicia desde el principio
+    //
+    // La posición dentro del ciclo se calcula con módulo para tolerar schedules
+    // que comenzaron hace muchos ciclos (ej: schedule de 24h × repetición diaria).
+    let resumeSeekSeconds = 0;
+    if (totalDuration > 0) {
+      if (scheduleEntry?.startTime) {
+        const elapsedMs = Date.now() - (scheduleEntry.startTime as Date).getTime();
+        const elapsed   = Math.max(0, elapsedMs / 1000);
+        resumeSeekSeconds = elapsed % totalDuration;
+      } else if (session.contentStartedAt) {
+        const elapsedMs = Date.now() - session.contentStartedAt;
+        const elapsed   = Math.max(0, elapsedMs / 1000);
+        resumeSeekSeconds = elapsed % totalDuration;
+      }
+    }
+    if (resumeSeekSeconds > 5) {
+      this.log(
+        session,
+        `⏩ Reanudando en ${resumeSeekSeconds.toFixed(1)}s del ciclo` +
+        ` (${(resumeSeekSeconds / 60).toFixed(1)}min /` +
+        ` ${(totalDuration / 60).toFixed(1)}min ciclo)`,
+      );
+    }
+    // Argumentos de seek (input-side: FFmpeg salta al punto sin leer todo el concat)
+    const seekArgs: string[] = resumeSeekSeconds > 5
+      ? ['-ss', resumeSeekSeconds.toFixed(3)]
+      : [];
+
     // ── Expansión del concat para cobertura ~24h sin -stream_loop ────────────────
     //
     // -stream_loop -1 causa una DISCONTINUIDAD PTS al hacer wrap-around:
@@ -760,9 +806,12 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     // Solución: repetir las entradas del concat para cubrir ~24h de emisión sin
     // ningún wrap-around. Cuando FFmpeg termina (code=0), el close handler
     // reinicia el proceso en 1 s con un nuevo concat expandido.
+    //
+    // Con reanudación: cubrir 24h DESDE el punto de seek (no desde el inicio),
+    // por eso sumamos resumeSeekSeconds al total necesario.
     const COVERAGE_SECONDS = 24 * 3600; // 24 horas de cobertura continua
     const loopCount = totalDuration > 0
-      ? Math.max(1, Math.ceil(COVERAGE_SECONDS / totalDuration))
+      ? Math.max(1, Math.ceil((COVERAGE_SECONDS + resumeSeekSeconds) / totalDuration))
       : 50; // fallback cuando las duraciones son desconocidas
     const expandedLines = loopCount > 1
       ? Array.from({ length: loopCount }, () => concatLines).flat()
@@ -901,6 +950,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           // Ruta A: decode + filter_complex + encode
           '-loglevel', 'warning',
           '-re',
+          ...seekArgs,        // seek input-side: FFmpeg salta al punto sin leer todo el concat
           ...inputFlags,
           '-thread_queue_size', '512',
           '-f', 'concat', '-safe', '0', '-i', concatPath,
@@ -917,9 +967,14 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
             // Ruta B: stream-copy — bitstream pasa directo al muxer HLS sin decode/encode
             '-loglevel', 'warning',
             '-re',
+            ...seekArgs,      // seek input-side (norm files tienen keyframe cada 2s → seek preciso)
             '-thread_queue_size', '512',
             '-f', 'concat', '-safe', '0', '-i', concatPath,
             '-c', 'copy',
+            // H.264 en MP4 usa AVCC (length-prefix); MPEG-TS/HLS requiere Annex B (start codes).
+            // FFmpeg debería aplicar esto automáticamente, pero con el concat demuxer
+            // algunos builds no lo hacen → forzarlo explícitamente.
+            '-bsf:v', 'h264_mp4toannexb',
             '-max_muxing_queue_size', '9999',
             ...hlsArgs,
           ]
@@ -927,6 +982,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
             // Ruta C: re-encode en tiempo real (archivos raw, primer arranque)
             '-loglevel', 'warning',
             '-re',
+            ...seekArgs,      // seek input-side: salta al punto de reanudación
             ...inputFlags,
             '-thread_queue_size', '512',
             '-f', 'concat', '-safe', '0', '-i', concatPath,
@@ -1121,6 +1177,8 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
             data: { status: 'LIVE_PLAYLIST' },
           });
           this.log(session, '✓ index.m3u8 listo → LIVE_PLAYLIST');
+          // Fijar hora de primer LIVE (??= → no se sobreescribe en reinicios sucesivos)
+          session.contentStartedAt ??= Date.now();
           // Arrancar salidas RTMP
           this.startRtmpOutputs(session).catch(err =>
             this.log(session, `RTMP init error: ${err.message}`),
@@ -1220,7 +1278,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     const needsReencode = !!(output.customBitrate || output.customQuality);
     const ffmpegArgs = (() => {
       if (!needsReencode) {
-        return ['-loglevel', 'warning', '-re', '-i', m3u8, '-c', 'copy', '-f', format, target];
+        // -live_start_index -3: conectar desde los 3 últimos segmentos del m3u8.
+        // Sin esto, al reconectarse tras un reinicio de HLS, FFmpeg intenta leer
+        // desde el número de segmento anterior (epoch-based, ej: 1750000000) y
+        // el nuevo m3u8 solo tiene segmentos desde el nuevo epoch → "skipping N ahead".
+        return ['-loglevel', 'warning', '-re', '-live_start_index', '-3', '-i', m3u8, '-c', 'copy', '-f', format, target];
       }
       const QUALITY_PRESETS: Record<string, { scale: string; aBitrate: string }> = {
         '480p':  { scale: 'scale=854:480',   aBitrate: '96k'  },
@@ -1836,48 +1898,54 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     // Evita que fs.access(normPath) devuelva true sobre un archivo incompleto
     // (sin moov atom) cuando FFmpeg reinicia antes de que termine la normalización.
     const tmpOutput = `${outputPath}.tmp`;
+    const stderrLines: string[] = [];
     const ok = await new Promise<boolean>((resolve) => {
-      const proc = spawn(
-        'nice', ['-n', '10', 'ffmpeg',
-          '-y', '-loglevel', 'error',
-          '-i', inputPath,
-          // ─── Video ─────────────────────────────────────────────────────────
-          '-vf', [
-            `scale=${quality.scale}:force_original_aspect_ratio=decrease`,
-            `pad=${quality.scale}:(ow-iw)/2:(oh-ih)/2:black`,
-            'fps=25',
-            'format=yuv420p',
-          ].join(','),
-          '-c:v',         'libx264',
-          '-preset',      'ultrafast',
-          '-crf',         '22',
-          '-b:v',         quality.vBitrate,
-          '-maxrate',     quality.maxrate,
-          '-bufsize',     quality.bufsize,
-          '-g',           '50',
-          '-keyint_min',  '50',
-          '-sc_threshold','0',
-          '-profile:v',   'high',
-          '-level:v',     '4.0',
-          // ─── Audio ─────────────────────────────────────────────────────────
-          '-c:a',  'aac',
-          '-ar',   '44100',
-          '-ac',   '2',
-          '-b:a',  quality.aBitrate,
-          // ─── Timestamps ────────────────────────────────────────────────────
-          '-avoid_negative_ts', 'make_zero',
-          '-movflags', '+faststart',
-          tmpOutput,
-        ],
-        { stdio: ['ignore', 'ignore', 'pipe'] },
-      );
+      // NOTA: NO usar `nice -n 10 ffmpeg` — `nice` puede no estar disponible en
+      // el contenedor y causaría un error ENOENT inmediato sin ningún mensaje útil.
+      const proc = spawn('ffmpeg', [
+        '-y', '-loglevel', 'error',
+        '-i', inputPath,
+        // ─── Video ─────────────────────────────────────────────────────────
+        '-vf', [
+          `scale=${quality.scale}:force_original_aspect_ratio=decrease`,
+          `pad=${quality.scale}:(ow-iw)/2:(oh-ih)/2:black`,
+          'fps=25',
+          'format=yuv420p',
+        ].join(','),
+        '-c:v',         'libx264',
+        '-preset',      'ultrafast',
+        '-crf',         '22',
+        '-b:v',         quality.vBitrate,
+        '-maxrate',     quality.maxrate,
+        '-bufsize',     quality.bufsize,
+        '-g',           '50',
+        '-keyint_min',  '50',
+        '-sc_threshold','0',
+        '-profile:v',   'high',
+        '-level:v',     '4.0',
+        // ─── Audio ─────────────────────────────────────────────────────────
+        // aformat fuerza cualquier layout (mono, 5.1, 7.1, HE-AACv2…) a estéreo
+        // antes del encoder; evita el error "channel element X not allocated" con
+        // fuentes multicanal y garantiza AAC 2ch 44100Hz en el archivo de salida.
+        '-af', 'aformat=channel_layouts=stereo',
+        '-c:a',  'aac',
+        '-ar',   '44100',
+        '-ac',   '2',
+        '-b:a',  quality.aBitrate,
+        // ─── Timestamps ────────────────────────────────────────────────────
+        '-avoid_negative_ts', 'make_zero',
+        '-movflags', '+faststart',
+        tmpOutput,
+      ], { stdio: ['ignore', 'ignore', 'pipe'] });
+      proc.stderr.on('data', (d: Buffer) => stderrLines.push(d.toString().trim()));
       proc.on('close', (code) => resolve(code === 0));
-      proc.on('error', () => resolve(false));
+      proc.on('error', (err) => { stderrLines.push(err.message); resolve(false); });
     });
 
     if (!ok) {
       await fs.unlink(tmpOutput).catch(() => {});
-      throw new Error(`normalizeVideoForBroadcast falló: ${path.basename(inputPath)}`);
+      const detail = stderrLines.filter(Boolean).slice(-3).join(' | ') || 'sin detalle';
+      throw new Error(`normalizeVideoForBroadcast falló: ${path.basename(inputPath)} — ${detail}`);
     }
     await fs.rename(tmpOutput, outputPath);
   }
