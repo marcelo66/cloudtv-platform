@@ -1001,11 +1001,16 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     ];
 
     // Filtro de audio (decode+encode paths — overlays o re-encode de raw).
-    // aresample async=10000: compensa hasta ±111ms de drift de PTS en transiciones
-    // entre clips del concat (aumentado desde 1000 para evitar "Queue input is
-    // backward in time" cuando un raw file tiene timestamps ligeramente irregulares).
     // aformat: convierte cualquier layout (mono, 5.1…) a estéreo antes del encoder.
-    const audioFilter = 'aformat=channel_layouts=stereo,aresample=async=10000';
+    // aresample: compensa desync de PTS en transiciones del concat demuxer.
+    //   async=44100: corrección instantánea (hasta 1s por segundo de audio = catch-up total).
+    //   min_hard_comp=0.001: umbral de 1ms para hard compensation (drop/insert samples).
+    //     El default (0.1s = 100ms) usa soft compensation gradual para saltos < 100ms, lo
+    //     que permite que el encoder AAC vea frames con PTS atrasado antes de que aresample
+    //     corrija → "Queue input is backward in time" + A/V desync acumulado.
+    //     Con 1ms: cualquier salto ≥ 1ms → drop inmediato de las muestras atrasadas
+    //     (inaudible) → encoder siempre ve PTS creciente.
+    const audioFilter = 'aformat=channel_layouts=stereo,aresample=async=44100:min_hard_comp=0.001';
 
     // Para el camino con overlays: el audio se incluye dentro del mismo filter_complex
     const finalFilterComplex = overlayFilter
