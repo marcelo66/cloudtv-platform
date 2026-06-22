@@ -471,7 +471,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     const allNormalized = pendingNorm.length === 0;
 
     if (allNormalized) {
-      this.log(session, `✓ Todo broadcast-ready → stream-copy desde el primer frame`);
+      this.log(session, `✓ Todo broadcast-ready (archivos normalizados)`);
     } else if (!session.bgNormRunning) {
       // Lanzar normalización en background: no bloquea el arranque
       session.bgNormRunning = true;
@@ -489,24 +489,21 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
             await this.normalizeVideoForBroadcast(rawPath, normPath, qualityEarly);
             done++;
             this.log(session, `  ✓ [bg-norm] ${done}/${normQueue.length} → ${path.basename(normPath)}`);
+            // Reiniciar FFmpeg después de CADA archivo normalizado para que el nuevo
+            // concat.txt use la versión norm en vez de raw. Esto previene los stalls
+            // de 25s+ que ocurren al transicionar a archivos raw sin faststart.
+            if (!session.stopping && this.sessions.has(session.channelId)
+                && session.process && !session.scheduleChangePending) {
+              this.log(session, `✓ [bg-norm] ${done}/${normQueue.length} completados → reiniciando con archivos normalizados`);
+              session.scheduleChangePending = true;
+              try { session.process.kill('SIGTERM'); } catch {}
+              await new Promise(resolve => setTimeout(resolve, 3000));
+            }
           } catch (err: any) {
             this.log(session, `  ✗ [bg-norm] falló ${path.basename(rawPath)}: ${err.message}`);
           }
         }
         session.bgNormRunning = false;
-        if (!session.stopping && this.sessions.has(session.channelId)) {
-          if (done > 0 && session.process) {
-            // Al menos un video se normalizó: reiniciar FFmpeg para usar stream-copy en
-            // el próximo ciclo. Con resume por horario la interrupción es < 4s y el
-            // canal retoma exactamente donde estaba. Los archivos prenorm eliminan el
-            // stall de transición que ocurre al abrir un MP4 raw sin faststart.
-            this.log(session, `✓ [bg-norm] ${done}/${normQueue.length} completados → reiniciando para stream-copy`);
-            session.scheduleChangePending = true;
-            try { session.process.kill('SIGTERM'); } catch {}
-          } else {
-            this.log(session, `✓ Normalización completa (${done}/${normQueue.length}) → listos para próximo inicio`);
-          }
-        }
       })();
     } else {
       this.log(session, `⚙ Normalización background ya en progreso — FFmpeg arranca con raw disponible`);
@@ -1183,9 +1180,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       // El watchdog detecta si FFmpeg deja de producir segmentos sin crashear
       // (stall silencioso al transicionar entre archivos raw de formatos distintos)
       // y reinicia automáticamente para usar más archivos normalizados.
+      const watchdogStallMs = allNormalized ? 25_000 : 45_000;
       setTimeout(() => {
         if (!session.stopping && session.process === proc) {
-          this.startSegmentWatchdog(session, m3u8Path);
+          this.startSegmentWatchdog(session, m3u8Path, watchdogStallMs);
         }
       }, 20_000);
     });
@@ -2021,13 +2019,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
    * Cada reinicio usa más archivos norm_*.mp4 (porque bg-norm avanzó), por lo que
    * las transiciones son más fluidas con cada iteración hasta que todas son smooth.
    */
-  private startSegmentWatchdog(session: PlayoutSession, m3u8Path: string): void {
-    const POLL_MS  = 5_000;   // comprobar cada 5 s
-    const STALL_MS = 25_000;  // 25 s sin nuevo segmento = FFmpeg estancado
-    // 25s: suficiente para cubrir una transición legítima lenta entre archivos del concat
-    // (en prenorm < 1s, en raw con faststart < 5s, en raw sin faststart hasta ~20s).
-    // Reducido de 45s: con auto-restart post-norm-bg ya no necesitamos tolerar stalls
-    // largos — cuando toda la playlist está normalizada, los stalls no ocurren.
+  private startSegmentWatchdog(session: PlayoutSession, m3u8Path: string, stallMs = 25_000): void {
+    const POLL_MS  = 5_000;
+    const STALL_MS = stallMs;
 
     let lastMtime    = 0;
     let lastUpdateAt = Date.now();
