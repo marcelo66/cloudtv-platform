@@ -19,6 +19,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Readable } from 'stream';
 import { createWriteStream } from 'fs';
 import { pipeline } from 'stream/promises';
+import { lookup } from 'dns/promises';
 
 export interface CompletedPart {
   PartNumber: number;
@@ -46,21 +47,24 @@ export class StorageService implements OnModuleInit {
 
     this.endpoint = endpoint;
 
-    // Node.js 20 rechaza underscores en hostnames via new URL().
-    // Parseamos manualmente para que funcione con nombres Docker Swarm (ej: cloudtv_minio).
+    // Node.js 20+ rechaza underscores en hostnames via new URL().
+    // Resolvemos el hostname por DNS a su IP para que el AWS SDK funcione
+    // con nombres Docker Swarm como cloudtv_minio.
+    let s3Endpoint = endpoint;
     const endpointMatch = endpoint.match(/^(https?):\/\/([^:/]+)(?::(\d+))?(\/.*)?$/);
-    const endpointObj = endpointMatch
-      ? {
-          protocol: endpointMatch[1] + ':',
-          hostname: endpointMatch[2],
-          port: endpointMatch[3] ? Number(endpointMatch[3]) : undefined,
-          path: endpointMatch[4] || '/',
-        }
-      : endpoint;
+    if (endpointMatch && endpointMatch[2].includes('_')) {
+      try {
+        const { address } = await lookup(endpointMatch[2]);
+        s3Endpoint = `${endpointMatch[1]}://${address}:${endpointMatch[3] || (endpointMatch[1] === 'https' ? '443' : '80')}${endpointMatch[4] || ''}`;
+        this.logger.log(`DNS: ${endpointMatch[2]} → ${address}`);
+      } catch (err) {
+        this.logger.warn(`No se pudo resolver ${endpointMatch[2]}: ${err.message}`);
+      }
+    }
 
     this.s3 = new S3Client({
       region: 'auto',
-      endpoint: endpointObj as any,
+      endpoint: s3Endpoint,
       credentials: {
         accessKeyId: this.config.get('R2_ACCESS_KEY_ID', 'minioadmin'),
         secretAccessKey: this.config.get(
