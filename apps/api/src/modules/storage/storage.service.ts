@@ -46,9 +46,21 @@ export class StorageService implements OnModuleInit {
 
     this.endpoint = endpoint;
 
+    // Node.js 20 rechaza underscores en hostnames via new URL().
+    // Parseamos manualmente para que funcione con nombres Docker Swarm (ej: cloudtv_minio).
+    const endpointMatch = endpoint.match(/^(https?):\/\/([^:/]+)(?::(\d+))?(\/.*)?$/);
+    const endpointObj = endpointMatch
+      ? {
+          protocol: endpointMatch[1] + ':',
+          hostname: endpointMatch[2],
+          port: endpointMatch[3] ? Number(endpointMatch[3]) : undefined,
+          path: endpointMatch[4] || '/',
+        }
+      : endpoint;
+
     this.s3 = new S3Client({
       region: 'auto',
-      endpoint,
+      endpoint: endpointObj as any,
       credentials: {
         accessKeyId: this.config.get('R2_ACCESS_KEY_ID', 'minioadmin'),
         secretAccessKey: this.config.get(
@@ -56,7 +68,6 @@ export class StorageService implements OnModuleInit {
           'minioadmin123',
         ),
       },
-      // MinIO / R2 necesitan path-style para buckets locales
       forcePathStyle: !accountId,
     });
 
