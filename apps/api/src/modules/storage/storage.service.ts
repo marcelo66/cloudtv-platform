@@ -274,7 +274,7 @@ export class StorageService implements OnModuleInit {
 
   getPublicUrl(key: string): string {
     if (this.apiPublicUrl) {
-      return `${this.apiPublicUrl.replace(/\/$/, '')}/storage/files/${key}`;
+      return `${this.apiPublicUrl.replace(/\/$/, '')}/api/storage/files/${key}`;
     }
     return `${this.publicUrl.replace(/\/$/, '')}/${key}`;
   }
