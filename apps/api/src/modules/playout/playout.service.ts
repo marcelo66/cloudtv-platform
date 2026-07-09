@@ -1070,6 +1070,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
             // Ruta B: stream-copy — bitstream pasa directo al muxer HLS sin decode/encode
             '-loglevel', 'warning',
             '-re',
+            ...inputFlags,
             '-thread_queue_size', '512',
             '-f', 'concat', '-safe', '0', '-i', concatPath,
             '-c', 'copy',
