@@ -1070,13 +1070,16 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
             // Ruta B: stream-copy — bitstream pasa directo al muxer HLS sin decode/encode
             '-loglevel', 'warning',
             '-re',
-            ...inputFlags,
+            // Flags específicos para copy: NO usar +igndts ni +genpts porque en copy
+            // mode los timestamps originales deben preservarse intactos.
+            '-fflags', '+discardcorrupt',
+            '-err_detect', 'ignore_err',
+            '-probesize', '10M',
+            '-analyzeduration', '10000000',
             '-thread_queue_size', '512',
             '-f', 'concat', '-safe', '0', '-i', concatPath,
             '-c', 'copy',
-            // H.264 en MP4 usa AVCC (length-prefix); MPEG-TS/HLS requiere Annex B (start codes).
-            // FFmpeg debería aplicar esto automáticamente, pero con el concat demuxer
-            // algunos builds no lo hacen → forzarlo explícitamente.
+            '-avoid_negative_ts', 'make_zero',
             '-bsf:v', 'h264_mp4toannexb',
             '-max_muxing_queue_size', '9999',
             ...hlsArgs,
