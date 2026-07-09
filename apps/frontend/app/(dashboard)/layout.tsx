@@ -4,6 +4,7 @@ import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Sidebar } from '@/components/dashboard/Sidebar';
 import { ImpersonationBanner } from '@/components/admin/ImpersonationBanner';
+import { TrialBanner } from '@/components/dashboard/TrialBanner';
 import { useAuthStore } from '@/stores/auth.store';
 
 export default function DashboardLayout({
@@ -39,6 +40,7 @@ export default function DashboardLayout({
       <Sidebar />
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <ImpersonationBanner />
+        <TrialBanner />
         {children}
       </main>
     </div>

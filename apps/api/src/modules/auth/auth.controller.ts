@@ -22,6 +22,7 @@ import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { Public } from '../common/decorators/public.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { getTrialExpiration, isTrialExpired } from '../common/constants/plan-limits';
 
 @ApiTags('Auth')
 @Controller('auth')
@@ -71,6 +72,13 @@ export class AuthController {
   @ApiOperation({ summary: 'Obtener usuario autenticado' })
   me(@CurrentUser() user: any) {
     const { passwordHash, ...safe } = user;
-    return safe;
+    const trialExpiresAt = getTrialExpiration(user.plan, user.createdAt);
+    return {
+      ...safe,
+      ...(trialExpiresAt && {
+        trialExpiresAt,
+        trialExpired: isTrialExpired(user.plan, user.createdAt),
+      }),
+    };
   }
 }

@@ -11,6 +11,8 @@ export interface AuthUser {
   avatarUrl?: string;
   role: string;
   plan: string;
+  trialExpiresAt?: string;
+  trialExpired?: boolean;
 }
 
 interface AdminSnapshot {

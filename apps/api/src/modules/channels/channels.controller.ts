@@ -16,11 +16,12 @@ import {
 import { ChannelsService } from './channels.service';
 import { CreateChannelDto, UpdateChannelDto } from './dto/create-channel.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { TrialGuard } from '../auth/guards/trial.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 
 @ApiTags('Channels')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, TrialGuard)
 @Controller('channels')
 export class ChannelsController {
   constructor(private channelsService: ChannelsService) {}

@@ -30,13 +30,14 @@ import {
   UpdateVideoDto,
 } from './dto/video.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { TrialGuard } from '../auth/guards/trial.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 
 const MAX_CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB por chunk máximo
 
 @ApiTags('Videos')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, TrialGuard)
 @Controller('videos')
 export class VideosController {
   constructor(private videosService: VideosService) {}
