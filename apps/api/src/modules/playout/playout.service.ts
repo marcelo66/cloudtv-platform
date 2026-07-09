@@ -1067,20 +1067,23 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
         ]
       : allNormalized
         ? [
-            // Ruta B: stream-copy — bitstream pasa directo al muxer HLS sin decode/encode
+            // Ruta B: video-copy + audio-reencode
+            // Video pasa directo (cero CPU). Audio se re-encodea para que aresample
+            // rectifique discontinuidades de PTS en las transiciones del concat,
+            // evitando stalls del muxer HLS que ocurren con -c copy puro.
             '-loglevel', 'warning',
             '-re',
-            // Flags específicos para copy: NO usar +igndts ni +genpts porque en copy
-            // mode los timestamps originales deben preservarse intactos.
             '-fflags', '+discardcorrupt',
             '-err_detect', 'ignore_err',
             '-probesize', '10M',
             '-analyzeduration', '10000000',
             '-thread_queue_size', '512',
             '-f', 'concat', '-safe', '0', '-i', concatPath,
-            '-c', 'copy',
-            '-avoid_negative_ts', 'make_zero',
+            '-c:v', 'copy',
             '-bsf:v', 'h264_mp4toannexb',
+            '-af', audioFilter,
+            '-c:a', 'aac', '-b:a', quality.aBitrate, '-ar', '44100', '-ac', '2',
+            '-avoid_negative_ts', 'make_zero',
             '-max_muxing_queue_size', '9999',
             ...hlsArgs,
           ]
@@ -1101,7 +1104,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     this.log(session, overlayFilter
       ? `Lanzando FFmpeg HLS + overlays (decode → filter → encode)…`
       : allNormalized
-        ? `Lanzando FFmpeg HLS stream-copy (broadcast-ready, sin re-encode)…`
+        ? `Lanzando FFmpeg HLS video-copy + audio-reencode (broadcast-ready)…`
         : `Lanzando FFmpeg HLS re-encode (raw; normalización en background)…`);
     if (finalFilterComplex) {
       // Log diagnóstico: mostrar el filter_complex completo (video + audio) para detectar errores de sintaxis
