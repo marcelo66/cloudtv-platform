@@ -32,6 +32,7 @@ export class StorageService implements OnModuleInit {
   private s3: S3Client;
   private bucket: string;
   private publicUrl: string;
+  private apiPublicUrl: string;
 
   constructor(private config: ConfigService) {}
 
@@ -80,6 +81,7 @@ export class StorageService implements OnModuleInit {
       'R2_PUBLIC_URL',
       'http://localhost:9000/cloudtv-storage',
     );
+    this.apiPublicUrl = this.config.get('API_PUBLIC_URL', '');
 
     this.logger.log(`Storage initialized → endpoint: ${endpoint}, bucket: ${this.bucket}`);
 
@@ -201,6 +203,19 @@ export class StorageService implements OnModuleInit {
     }
   }
 
+  // ─── Stream (para proxy público) ───────────────────────────────
+
+  async getObjectStream(key: string): Promise<{ stream: Readable; contentType?: string; contentLength?: number }> {
+    const result = await this.s3.send(
+      new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+    );
+    return {
+      stream: result.Body as Readable,
+      contentType: result.ContentType,
+      contentLength: result.ContentLength,
+    };
+  }
+
   // ─── Download ─────────────────────────────────────────────────
 
   async downloadToFile(key: string, destPath: string): Promise<void> {
@@ -258,6 +273,9 @@ export class StorageService implements OnModuleInit {
   // ─── URLs ─────────────────────────────────────────────────────
 
   getPublicUrl(key: string): string {
+    if (this.apiPublicUrl) {
+      return `${this.apiPublicUrl.replace(/\/$/, '')}/storage/files/${key}`;
+    }
     return `${this.publicUrl.replace(/\/$/, '')}/${key}`;
   }
 
