@@ -18,6 +18,7 @@ import {
   Info,
   Thermometer,
 } from 'lucide-react';
+import NextImage from 'next/image';
 import { Header } from '@/components/dashboard/Header';
 import apiClient from '@/lib/api-client';
 import {
@@ -251,11 +252,16 @@ function OverlayCard({
           </div>
           <p className="text-xs text-slate-400 mt-0.5 truncate">{configSummary()}</p>
           {overlay.type === 'LOGO' && cfg.imageUrl && (
-            <img
-              src={cfg.imageUrl}
-              alt="logo preview"
-              className="mt-2 h-8 object-contain rounded border border-surface-600"
-            />
+            <div className="relative mt-2 h-8 w-20">
+              <NextImage
+                src={cfg.imageUrl}
+                alt="logo preview"
+                fill
+                className="object-contain rounded border border-surface-600"
+                sizes="80px"
+                unoptimized={cfg.imageUrl?.endsWith('.gif')}
+              />
+            </div>
           )}
         </div>
       </div>
@@ -482,7 +488,7 @@ function OverlayFormModal({
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-xs text-slate-400 mb-1">Ancho (px, 0=original)</label>
-                  <input type="number" min={0} value={config.width ?? 120} onChange={e => setCfg('width', +e.target.value || undefined)}
+                  <input type="number" min={0} value={config.width ?? 0} onChange={e => setCfg('width', e.target.value === '' ? 0 : +e.target.value)}
                     className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500" />
                 </div>
                 <div>
@@ -496,11 +502,24 @@ function OverlayFormModal({
               <div>
                 <label className="block text-xs font-medium text-slate-400 mb-1">Imagen del logo</label>
                 {(pendingLogoPreview || config.imageUrl) && (
-                  <img
-                    src={pendingLogoPreview ?? config.imageUrl}
-                    alt="logo preview"
-                    className="h-14 object-contain rounded mb-2 border border-surface-600 bg-surface-900 p-1"
-                  />
+                  pendingLogoPreview ? (
+                    <img
+                      src={pendingLogoPreview}
+                      alt="logo preview"
+                      className="h-14 object-contain rounded mb-2 border border-surface-600 bg-surface-900 p-1"
+                    />
+                  ) : (
+                    <div className="relative h-14 w-full rounded mb-2 border border-surface-600 bg-surface-900 p-1">
+                      <NextImage
+                        src={config.imageUrl}
+                        alt="logo preview"
+                        fill
+                        className="object-contain p-1"
+                        sizes="300px"
+                        unoptimized={config.imageUrl?.endsWith('.gif')}
+                      />
+                    </div>
+                  )
                 )}
                 <button
                   type="button"
