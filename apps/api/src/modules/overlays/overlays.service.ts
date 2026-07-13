@@ -80,7 +80,7 @@ export class OverlaysService {
     const overlay = await this.prisma.overlay.findFirst({ where: { id, channelId } });
     if (!overlay) throw new NotFoundException('Overlay no encontrado');
 
-    const ext = file.mimetype.includes('png') ? 'png' : 'jpg';
+    const ext = file.mimetype.includes('gif') ? 'gif' : file.mimetype.includes('png') ? 'png' : 'jpg';
     const imageKey = `overlays/${channelId}/${id}/logo.${ext}`;
 
     // Eliminar imagen anterior si existe

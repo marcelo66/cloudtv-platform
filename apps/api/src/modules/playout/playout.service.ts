@@ -1574,7 +1574,8 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       if (ov.type === OverlayType.LOGO) {
         const cfg = ov.config as any;
         if (cfg?.imageKey) {
-          const localPath = path.join(session.hlsDir, `logo_${ov.id}.png`);
+          const logoExt = path.extname(cfg.imageKey) || '.png';
+          const localPath = path.join(session.hlsDir, `logo_${ov.id}${logoExt}`);
           try {
             await this.storage.downloadToFile(cfg.imageKey, localPath);
             const { size } = await fs.stat(localPath);
@@ -1709,8 +1710,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
     return {
       filterComplex:  filterParts.join(';'),
-      // -loop 1: el PNG se repite indefinidamente (sin esto provee 1 solo frame y luego EOF)
-      extraInputArgs: extraInputPaths.flatMap(p => ['-loop', '1', '-i', p]),
+      extraInputArgs: extraInputPaths.flatMap(p =>
+        p.endsWith('.gif')
+          ? ['-stream_loop', '-1', '-i', p]
+          : ['-loop', '1', '-i', p],
+      ),
       videoMapLabel:  `[${currentStream}]`,
     };
   }

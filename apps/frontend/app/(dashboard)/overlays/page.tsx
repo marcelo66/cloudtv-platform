@@ -515,12 +515,12 @@ function OverlayFormModal({
                       ? `✓ ${pendingLogo.name}`
                       : config.imageUrl
                         ? 'Cambiar imagen'
-                        : 'Seleccionar PNG / JPG'}
+                        : 'Seleccionar PNG / JPG / GIF'}
                 </button>
                 <input
                   ref={logoRef}
                   type="file"
-                  accept="image/png,image/jpeg,image/webp"
+                  accept="image/png,image/jpeg,image/webp,image/gif"
                   className="hidden"
                   onChange={handleLogoFileSelect}
                 />
