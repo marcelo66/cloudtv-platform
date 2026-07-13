@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
+import Image from 'next/image';
 import { Film, Upload, Search, Grid3X3, List, RefreshCw, Folder, FolderOpen, Zap, HardDrive } from 'lucide-react';
 import { Header } from '@/components/dashboard/Header';
 import { VideoCard } from '@/components/library/VideoCard';
@@ -247,11 +248,13 @@ export default function LibraryPage() {
                 key={video.id}
                 className="flex items-center gap-4 px-4 py-3 hover:bg-white/[0.02] transition-colors"
               >
-                <div className="w-16 h-10 rounded bg-surface-600 overflow-hidden flex-shrink-0 flex items-center justify-center">
+                <div className="relative w-16 h-10 rounded bg-surface-600 overflow-hidden flex-shrink-0">
                   {video.thumbnailUrl ? (
-                    <img src={video.thumbnailUrl} alt="" className="w-full h-full object-cover" />
+                    <Image src={video.thumbnailUrl} alt="" fill className="object-cover" sizes="64px" />
                   ) : (
-                    <Film className="w-4 h-4 text-slate-600" />
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <Film className="w-4 h-4 text-slate-600" />
+                    </div>
                   )}
                 </div>
                 <div className="flex-1 min-w-0">

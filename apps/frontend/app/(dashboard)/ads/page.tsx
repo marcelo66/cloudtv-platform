@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Image from 'next/image';
 import {
   Clapperboard,
   Plus,
@@ -498,7 +499,9 @@ function SpotRow({
       <span className="text-xs text-slate-600 w-4 flex-shrink-0">{index + 1}</span>
 
       {spot.video.thumbnailUrl ? (
-        <img src={spot.video.thumbnailUrl} alt="" className="w-10 h-6 rounded object-cover bg-surface-800 flex-shrink-0" />
+        <div className="relative w-10 h-6 rounded overflow-hidden bg-surface-800 flex-shrink-0">
+          <Image src={spot.video.thumbnailUrl} alt="" fill className="object-cover" sizes="40px" />
+        </div>
       ) : (
         <div className="w-10 h-6 rounded bg-surface-800 flex items-center justify-center flex-shrink-0">
           <Film className="w-3 h-3 text-slate-600" />

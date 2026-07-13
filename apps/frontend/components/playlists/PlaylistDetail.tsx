@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useMemo, useEffect } from 'react';
+import Image from 'next/image';
 import {
   ArrowLeft, Plus, Trash2, Film, GripVertical,
   RefreshCw, Check, Search, Folder, X,
@@ -123,11 +124,13 @@ function SortableItem({
       </span>
 
       {/* Thumbnail */}
-      <div className="w-14 h-8 rounded bg-surface-600 flex-shrink-0 overflow-hidden flex items-center justify-center">
+      <div className="relative w-14 h-8 rounded bg-surface-600 flex-shrink-0 overflow-hidden">
         {item.video.thumbnailUrl ? (
-          <img src={item.video.thumbnailUrl} alt="" className="w-full h-full object-cover" />
+          <Image src={item.video.thumbnailUrl} alt="" fill className="object-cover" sizes="56px" />
         ) : (
-          <Film className="w-3.5 h-3.5 text-slate-600" />
+          <div className="absolute inset-0 flex items-center justify-center">
+            <Film className="w-3.5 h-3.5 text-slate-600" />
+          </div>
         )}
       </div>
 
@@ -401,11 +404,13 @@ export function PlaylistDetail({ playlistId, channelId, onBack }: Props) {
                         : 'hover:bg-white/5 cursor-pointer',
                     )}
                   >
-                    <div className="w-12 h-7 rounded bg-surface-600 flex-shrink-0 overflow-hidden flex items-center justify-center">
+                    <div className="relative w-12 h-7 rounded bg-surface-600 flex-shrink-0 overflow-hidden">
                       {video.thumbnailUrl ? (
-                        <img src={video.thumbnailUrl} alt="" className="w-full h-full object-cover" />
+                        <Image src={video.thumbnailUrl} alt="" fill className="object-cover" sizes="48px" />
                       ) : (
-                        <Film className="w-3.5 h-3.5 text-slate-600" />
+                        <div className="absolute inset-0 flex items-center justify-center">
+                          <Film className="w-3.5 h-3.5 text-slate-600" />
+                        </div>
                       )}
                     </div>
                     <div className="flex-1 min-w-0">
