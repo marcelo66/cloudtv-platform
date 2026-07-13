@@ -15,6 +15,7 @@ import {
   CompleteUploadDto,
   UpdateVideoDto,
 } from './dto/video.dto';
+import { PLAN_LIMITS } from '../common/constants/plan-limits';
 
 export const VIDEO_QUEUE = 'video-processing';
 
@@ -50,6 +51,25 @@ export class VideosService {
     });
     if (!channel) {
       throw new ForbiddenException('Canal no encontrado o sin permisos');
+    }
+
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (user && user.role !== 'ADMIN' && user.role !== 'SUPER_ADMIN') {
+      const planLimit = PLAN_LIMITS[user.plan];
+      if (planLimit) {
+        const result = await this.prisma.video.aggregate({
+          where: { channel: { userId } },
+          _sum: { fileSize: true },
+        });
+        const usedBytes = Number(result._sum.fileSize ?? 0);
+        if (usedBytes + dto.fileSize > planLimit.maxStorageBytes) {
+          const usedGB = (usedBytes / (1024 * 1024 * 1024)).toFixed(2);
+          const limitGB = (planLimit.maxStorageBytes / (1024 * 1024 * 1024)).toFixed(0);
+          throw new ForbiddenException(
+            `Almacenamiento lleno: ${usedGB} GB usados de ${limitGB} GB (plan ${planLimit.displayName}). Eliminá videos o actualizá tu plan.`,
+          );
+        }
+      }
     }
 
     const ext = this.getExtension(dto.filename, dto.mimeType);

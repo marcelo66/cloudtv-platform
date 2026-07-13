@@ -2,17 +2,18 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
-import { Film, Upload, Search, Grid3X3, List, RefreshCw, Folder, FolderOpen, Zap } from 'lucide-react';
+import { Film, Upload, Search, Grid3X3, List, RefreshCw, Folder, FolderOpen, Zap, HardDrive } from 'lucide-react';
 import { Header } from '@/components/dashboard/Header';
 import { VideoCard } from '@/components/library/VideoCard';
 import { VideoStatusBadge } from '@/components/library/VideoStatusBadge';
 import { useVideos, useUpdateVideo, useDeleteVideo, usePrenormalizeVideos, useRenormalizeVideo } from '@/hooks/useVideos';
+import { useAuthStore } from '@/stores/auth.store';
 import apiClient from '@/lib/api-client';
-import { formatDuration, formatBytes } from '@/lib/utils';
-import { cn } from '@/lib/utils';
+import { formatDuration, formatBytes, cn } from '@/lib/utils';
 import { toast } from 'sonner';
 
 export default function LibraryPage() {
+  const authUser = useAuthStore((s) => s.user);
   const [channelId, setChannelId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
@@ -133,6 +134,13 @@ export default function LibraryPage() {
               {prenormalize.isPending ? 'Encolando…' : 'Pre-normalizar'}
             </button>
           )}
+
+          {authUser?.storageUsed != null && authUser?.storageLimit ? (
+            <div className="flex items-center gap-1.5 text-xs text-slate-400">
+              <HardDrive className="w-3.5 h-3.5" />
+              <span>{formatBytes(authUser.storageUsed)} / {formatBytes(authUser.storageLimit)}</span>
+            </div>
+          ) : null}
 
           <Link
             href="/library/upload"

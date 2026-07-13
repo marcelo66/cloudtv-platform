@@ -17,7 +17,7 @@ import { StatsCard } from '@/components/dashboard/StatsCard';
 import { ChannelStatusCard } from '@/components/channel/ChannelStatusCard';
 import { useAuthStore } from '@/stores/auth.store';
 import apiClient from '@/lib/api-client';
-import { formatDuration } from '@/lib/utils';
+import { formatDuration, formatBytes } from '@/lib/utils';
 import Link from 'next/link';
 import { toast } from 'sonner';
 
@@ -257,33 +257,47 @@ export default function DashboardPage() {
               ))}
             </div>
 
-            {/* Activity indicator */}
+            {/* Storage & plan */}
             <div className="glass-card p-4">
-              <div className="flex items-center gap-2 mb-3">
-                <Activity className="w-4 h-4 text-slate-400" />
-                <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-                  Actividad del sistema
-                </span>
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <Activity className="w-4 h-4 text-slate-400" />
+                  <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                    Almacenamiento
+                  </span>
+                </div>
+                {user?.planLimits?.displayName && (
+                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-brand-600/20 text-brand-400 border border-brand-600/30">
+                    {user.planLimits.displayName}
+                  </span>
+                )}
               </div>
-              <div className="space-y-2">
-                {[
-                  { label: 'CPU Worker', value: 12, color: 'bg-blue-500' },
-                  { label: 'Almacenamiento', value: 34, color: 'bg-purple-500' },
-                  { label: 'Ancho de banda', value: 8, color: 'bg-green-500' },
-                ].map(({ label, value, color }) => (
-                  <div key={label}>
-                    <div className="flex justify-between text-xs mb-1">
-                      <span className="text-slate-500">{label}</span>
-                      <span className="text-slate-400">{value}%</span>
-                    </div>
-                    <div className="h-1 bg-surface-600 rounded-full overflow-hidden">
-                      <div
-                        className={`h-full ${color} rounded-full transition-all duration-500`}
-                        style={{ width: `${value}%` }}
-                      />
-                    </div>
-                  </div>
-                ))}
+              <div>
+                {(() => {
+                  const used = user?.storageUsed ?? 0;
+                  const limit = user?.storageLimit ?? 1;
+                  const pct = Math.min(Math.round((used / limit) * 100), 100);
+                  const barColor =
+                    pct > 95 ? 'bg-red-500' : pct > 80 ? 'bg-yellow-500' : 'bg-brand-500';
+                  return (
+                    <>
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-slate-400">
+                          {formatBytes(used)} / {formatBytes(limit)}
+                        </span>
+                        <span className={pct > 95 ? 'text-red-400' : pct > 80 ? 'text-yellow-400' : 'text-slate-400'}>
+                          {pct}%
+                        </span>
+                      </div>
+                      <div className="h-1.5 bg-surface-600 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full ${barColor} rounded-full transition-all duration-500`}
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
             </div>
           </div>

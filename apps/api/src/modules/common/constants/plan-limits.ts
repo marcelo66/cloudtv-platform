@@ -1,8 +1,42 @@
-export const PLAN_LIMITS: Record<string, { maxChannels: number; trialDays?: number }> = {
-  FREE:       { maxChannels: 1, trialDays: 3 },
-  STARTER:    { maxChannels: 3 },
-  PRO:        { maxChannels: 10 },
-  ENTERPRISE: { maxChannels: 9999 },
+export interface PlanLimit {
+  displayName: string;
+  maxChannels: number;
+  maxStorageBytes: number;
+  maxOutputs: number;
+  maxUsers: number;
+  trialDays?: number;
+}
+
+export const PLAN_LIMITS: Record<string, PlanLimit> = {
+  FREE: {
+    displayName: 'Free',
+    maxChannels: 1,
+    maxStorageBytes: 1 * 1024 * 1024 * 1024,
+    maxOutputs: 1,
+    maxUsers: 1,
+    trialDays: 3,
+  },
+  STARTER: {
+    displayName: 'Starter',
+    maxChannels: 1,
+    maxStorageBytes: 10 * 1024 * 1024 * 1024,
+    maxOutputs: 1,
+    maxUsers: 2,
+  },
+  PRO: {
+    displayName: 'Pro',
+    maxChannels: 3,
+    maxStorageBytes: 20 * 1024 * 1024 * 1024,
+    maxOutputs: 5,
+    maxUsers: 10,
+  },
+  ENTERPRISE: {
+    displayName: 'Cloud Plus',
+    maxChannels: 10,
+    maxStorageBytes: 50 * 1024 * 1024 * 1024,
+    maxOutputs: 20,
+    maxUsers: 30,
+  },
 };
 
 export function getTrialExpiration(plan: string, createdAt: Date): Date | null {

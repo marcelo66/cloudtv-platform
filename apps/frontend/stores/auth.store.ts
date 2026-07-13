@@ -13,6 +13,15 @@ export interface AuthUser {
   plan: string;
   trialExpiresAt?: string;
   trialExpired?: boolean;
+  storageUsed?: number;
+  storageLimit?: number;
+  planLimits?: {
+    displayName: string;
+    maxChannels: number;
+    maxStorageBytes: number;
+    maxOutputs: number;
+    maxUsers: number;
+  };
 }
 
 interface AdminSnapshot {

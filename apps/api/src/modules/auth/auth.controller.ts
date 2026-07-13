@@ -16,18 +16,22 @@ import {
 } from '@nestjs/swagger';
 import { AuthGuard } from '@nestjs/passport';
 import { AuthService } from './auth.service';
+import { PrismaService } from '../prisma/prisma.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { Public } from '../common/decorators/public.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
-import { getTrialExpiration, isTrialExpired } from '../common/constants/plan-limits';
+import { getTrialExpiration, isTrialExpired, PLAN_LIMITS } from '../common/constants/plan-limits';
 
 @ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private authService: AuthService) {}
+  constructor(
+    private authService: AuthService,
+    private prisma: PrismaService,
+  ) {}
 
   @Public()
   @Post('register')
@@ -70,15 +74,26 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Obtener usuario autenticado' })
-  me(@CurrentUser() user: any) {
+  async me(@CurrentUser() user: any) {
     const { passwordHash, ...safe } = user;
     const trialExpiresAt = getTrialExpiration(user.plan, user.createdAt);
+    const planLimit = PLAN_LIMITS[user.plan];
+
+    const result = await this.prisma.video.aggregate({
+      where: { channel: { userId: user.id } },
+      _sum: { fileSize: true },
+    });
+    const storageUsed = Number(result._sum.fileSize ?? 0);
+
     return {
       ...safe,
       ...(trialExpiresAt && {
         trialExpiresAt,
         trialExpired: isTrialExpired(user.plan, user.createdAt),
       }),
+      storageUsed,
+      storageLimit: planLimit?.maxStorageBytes ?? 0,
+      planLimits: planLimit ?? null,
     };
   }
 }
