@@ -2723,7 +2723,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     const now = new Date();
     const videoSelect = { id: true, originalKey: true, processedKey: true, norm480pKey: true, norm720pKey: true, norm1080pKey: true, duration: true, status: true } as const;
     const itemsArgs = {
-      where: { OR: [{ video: { status: VideoStatus.READY } }, { adBlockId: { not: null } }] },
+      where: { OR: [{ video: { status: VideoStatus.READY } }, { adBlockId: { not: null } }] as any },
       orderBy: { order: 'asc' as const },
       include: {
         video: { select: videoSelect },
@@ -2737,7 +2737,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           },
         },
       },
-    } as const;
+    };
 
     // 1. Schedule activo con mayor prioridad
     const schedule = await this.prisma.schedule.findFirst({
