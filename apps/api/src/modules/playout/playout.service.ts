@@ -322,8 +322,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     session.pollToken++;
     const myPollToken = session.pollToken;
 
-    // 1. Playlist activa
-    const { playlist, scheduleEndTime, fillerPlaylist } = await this.getActivePlaylist(session.channelId);
+    // 1. Playlist activa (ad block items se expanden en videos individuales)
+    const activeResult = await this.getActivePlaylist(session.channelId);
+    const playlist = this.expandAdBlockItems(activeResult.playlist);
+    const { scheduleEndTime } = activeResult;
+    const fillerPlaylist = this.expandAdBlockItems(activeResult.fillerPlaylist);
     if (!playlist?.items?.length) {
       this.log(session, 'ERROR: Sin playlist o sin videos READY. Abortando.');
       await this.prisma.channel.update({
@@ -2718,12 +2721,20 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
   private async getActivePlaylist(channelId: string) {
     const now = new Date();
+    const videoSelect = { id: true, originalKey: true, processedKey: true, norm480pKey: true, norm720pKey: true, norm1080pKey: true, duration: true, status: true } as const;
     const itemsArgs = {
-      where: { video: { status: VideoStatus.READY } },
+      where: { OR: [{ video: { status: VideoStatus.READY } }, { adBlockId: { not: null } }] },
       orderBy: { order: 'asc' as const },
       include: {
-        video: {
-          select: { id: true, originalKey: true, processedKey: true, norm480pKey: true, norm720pKey: true, norm1080pKey: true, duration: true, status: true },
+        video: { select: videoSelect },
+        adBlock: {
+          include: {
+            spots: {
+              where: { isActive: true },
+              include: { video: { select: videoSelect } },
+              orderBy: { order: 'asc' as const },
+            },
+          },
         },
       },
     } as const;
@@ -2767,5 +2778,22 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       include: { items: itemsArgs },
     });
     return { playlist: any ?? null, scheduleEndTime: null, fillerPlaylist: null };
+  }
+
+  private expandAdBlockItems(playlist: any): any {
+    if (!playlist?.items) return playlist;
+    const expanded: any[] = [];
+    for (const item of playlist.items) {
+      if (item.adBlockId && item.adBlock?.spots?.length) {
+        for (const spot of item.adBlock.spots) {
+          if (spot.video?.status === VideoStatus.READY) {
+            expanded.push({ ...item, videoId: spot.video.id, video: spot.video, adBlockId: null, adBlock: null });
+          }
+        }
+      } else if (item.video) {
+        expanded.push(item);
+      }
+    }
+    return { ...playlist, items: expanded };
   }
 }

@@ -7,13 +7,24 @@ export interface PlaylistItem {
   order: number;
   trimStart?: number;
   trimEnd?: number;
-  video: {
+  videoId?: string | null;
+  video?: {
     id: string;
     title: string;
     duration?: number;
     thumbnailUrl?: string;
     status: string;
-  };
+  } | null;
+  adBlockId?: string | null;
+  adBlock?: {
+    id: string;
+    name: string;
+    spots: Array<{
+      id: string;
+      name: string;
+      video: { id: string; title: string; duration?: number; thumbnailUrl?: string };
+    }>;
+  } | null;
 }
 
 export interface Playlist {
@@ -117,6 +128,20 @@ export function useAddPlaylistItem() {
       toast.success('Video agregado');
     },
     onError: () => toast.error('Error al agregar video'),
+  });
+}
+
+export function useAddPlaylistAdBlock() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ playlistId, adBlockId }: { playlistId: string; adBlockId: string }) =>
+      apiClient.post(`/playlists/${playlistId}/ad-items`, { adBlockId }),
+    onSuccess: (_, vars) => {
+      qc.invalidateQueries({ queryKey: ['playlist', vars.playlistId] });
+      qc.invalidateQueries({ queryKey: ['playlists'] });
+      toast.success('Bloque publicitario agregado');
+    },
+    onError: () => toast.error('Error al agregar bloque publicitario'),
   });
 }
 

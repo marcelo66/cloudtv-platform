@@ -6,6 +6,7 @@ import { PlaylistsService } from './playlists.service';
 import { CreatePlaylistDto } from './dto/create-playlist.dto';
 import { UpdatePlaylistDto } from './dto/update-playlist.dto';
 import { AddItemDto } from './dto/add-item.dto';
+import { AddAdBlockItemDto } from './dto/add-ad-block-item.dto';
 import { ReorderItemsDto } from './dto/reorder-items.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 
@@ -44,6 +45,11 @@ export class PlaylistsController {
   @Post(':id/items')
   addItem(@Param('id') id: string, @Body() dto: AddItemDto, @Req() req: any) {
     return this.service.addItem(id, dto, req.user.id);
+  }
+
+  @Post(':id/ad-items')
+  addAdBlockItem(@Param('id') id: string, @Body() dto: AddAdBlockItemDto, @Req() req: any) {
+    return this.service.addAdBlockItem(id, dto, req.user.id);
   }
 
   @Delete(':id/items/:itemId')

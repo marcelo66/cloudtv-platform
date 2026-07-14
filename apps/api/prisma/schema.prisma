@@ -162,8 +162,10 @@ model PlaylistItem {
   id         String   @id @default(cuid())
   playlistId String   @map("playlist_id")
   playlist   Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
-  videoId    String   @map("video_id")
-  video      Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  videoId    String?  @map("video_id")
+  video      Video?   @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  adBlockId  String?  @map("ad_block_id")
+  adBlock    AdBlock? @relation(fields: [adBlockId], references: [id], onDelete: Cascade)
   order      Int
   trimStart  Float?   @map("trim_start")
   trimEnd    Float?   @map("trim_end")
@@ -296,6 +298,7 @@ model AdBlock {
   spots       AdSpot[]
   cuePoints   CuePoint[]
   impressions AdImpression[]
+  playlistItems PlaylistItem[]
   // Reverse relations para intervalo de canal y tandas de programa
   intervalChannels Channel[]   @relation("ChannelAdInterval")
   preSchedules     Schedule[]  @relation("SchedulePreAd")

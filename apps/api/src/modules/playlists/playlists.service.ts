@@ -8,6 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CreatePlaylistDto } from './dto/create-playlist.dto';
 import { UpdatePlaylistDto } from './dto/update-playlist.dto';
 import { AddItemDto } from './dto/add-item.dto';
+import { AddAdBlockItemDto } from './dto/add-ad-block-item.dto';
 import { ReorderItemsDto } from './dto/reorder-items.dto';
 
 @Injectable()
@@ -38,10 +39,16 @@ export class PlaylistsService {
   private async recalcDuration(playlistId: string) {
     const items = await this.prisma.playlistItem.findMany({
       where: { playlistId },
-      include: { video: true },
+      include: {
+        video: true,
+        adBlock: { include: { spots: { where: { isActive: true }, include: { video: true } } } },
+      },
     });
     const total = items.reduce((acc, item) => {
-      if (!item.video.duration) return acc;
+      if (item.adBlockId && item.adBlock) {
+        return acc + item.adBlock.spots.reduce((s, spot) => s + (spot.video.duration ?? 0), 0);
+      }
+      if (!item.video?.duration) return acc;
       const start = item.trimStart ?? 0;
       const end = item.trimEnd ?? item.video.duration;
       return acc + Math.max(0, end - start);
@@ -94,7 +101,10 @@ export class PlaylistsService {
       where: { id },
       include: {
         items: {
-          include: { video: true },
+          include: {
+            video: true,
+            adBlock: { include: { spots: { where: { isActive: true }, include: { video: true }, orderBy: { order: 'asc' } } } },
+          },
           orderBy: { order: 'asc' },
         },
       },
@@ -179,6 +189,39 @@ export class PlaylistsService {
 
     await this.recalcDuration(playlistId);
     return { success: true };
+  }
+
+  async addAdBlockItem(playlistId: string, dto: AddAdBlockItemDto, userId: string) {
+    const playlist = await this.verifyPlaylistOwnership(playlistId, userId);
+
+    const adBlock = await this.prisma.adBlock.findUnique({
+      where: { id: dto.adBlockId },
+      include: { spots: { where: { isActive: true } } },
+    });
+    if (!adBlock) throw new NotFoundException('Bloque publicitario no encontrado');
+    if (adBlock.channelId !== playlist.channelId) {
+      throw new BadRequestException('El bloque no pertenece a este canal');
+    }
+
+    const lastItem = await this.prisma.playlistItem.findFirst({
+      where: { playlistId },
+      orderBy: { order: 'desc' },
+    });
+    const nextOrder = (lastItem?.order ?? -1) + 1;
+
+    const item = await this.prisma.playlistItem.create({
+      data: {
+        playlistId,
+        adBlockId: dto.adBlockId,
+        order: nextOrder,
+      },
+      include: {
+        adBlock: { include: { spots: { where: { isActive: true }, include: { video: true }, orderBy: { order: 'asc' } } } },
+      },
+    });
+
+    await this.recalcDuration(playlistId);
+    return item;
   }
 
   async reorderItems(playlistId: string, dto: ReorderItemsDto, userId: string) {

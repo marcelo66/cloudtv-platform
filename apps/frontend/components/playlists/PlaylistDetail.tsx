@@ -5,7 +5,7 @@ import Image from 'next/image';
 import {
   ArrowLeft, Plus, Trash2, Film, GripVertical,
   RefreshCw, Check, Search, Folder, X,
-  ChevronUp, ChevronDown,
+  ChevronUp, ChevronDown, Megaphone,
 } from 'lucide-react';
 import {
   DndContext,
@@ -27,11 +27,13 @@ import { CSS } from '@dnd-kit/utilities';
 import {
   usePlaylist,
   useAddPlaylistItem,
+  useAddPlaylistAdBlock,
   useRemovePlaylistItem,
   useReorderPlaylistItems,
   PlaylistItem,
 } from '@/hooks/usePlaylists';
 import { useVideos } from '@/hooks/useVideos';
+import { useAdBlocks } from '@/hooks/useAdBlocks';
 import { formatDuration } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 
@@ -123,29 +125,55 @@ function SortableItem({
         {idx + 1}
       </span>
 
-      {/* Thumbnail */}
-      <div className="relative w-14 h-8 rounded bg-surface-600 flex-shrink-0 overflow-hidden">
-        {item.video.thumbnailUrl ? (
-          <Image src={item.video.thumbnailUrl} alt="" fill className="object-cover" sizes="56px" />
-        ) : (
-          <div className="absolute inset-0 flex items-center justify-center">
-            <Film className="w-3.5 h-3.5 text-slate-600" />
-          </div>
-        )}
-      </div>
+      {/* Thumbnail / Ad icon */}
+      {item.adBlockId ? (
+        <div className="w-14 h-8 rounded bg-amber-500/10 border border-amber-500/30 flex-shrink-0 flex items-center justify-center">
+          <Megaphone className="w-3.5 h-3.5 text-amber-400" />
+        </div>
+      ) : (
+        <div className="relative w-14 h-8 rounded bg-surface-600 flex-shrink-0 overflow-hidden">
+          {item.video?.thumbnailUrl ? (
+            <Image src={item.video.thumbnailUrl} alt="" fill className="object-cover" sizes="56px" />
+          ) : (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <Film className="w-3.5 h-3.5 text-slate-600" />
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Info */}
       <div className="flex-1 min-w-0">
-        <p className="text-sm text-white truncate">{item.video.title}</p>
-        <div className="flex items-center gap-2 mt-0.5">
-          {item.video.duration && (
-            <span className="text-xs text-slate-500">{formatDuration(item.video.duration)}</span>
-          )}
-          {/* Posición acumulada en la playlist */}
-          <span className="text-[11px] text-slate-600 font-mono" title="Posición de inicio en la playlist">
-            @ {formatOffset(startOffset)}
-          </span>
-        </div>
+        {item.adBlockId && item.adBlock ? (
+          <>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/25">PUBLICIDAD</span>
+              <p className="text-sm text-white truncate">{item.adBlock.name}</p>
+            </div>
+            <div className="flex items-center gap-2 mt-0.5">
+              <span className="text-xs text-slate-500">
+                {item.adBlock.spots.length} spot{item.adBlock.spots.length !== 1 ? 's' : ''}
+                {' · '}
+                {formatDuration(item.adBlock.spots.reduce((s, sp) => s + (sp.video.duration ?? 0), 0))}
+              </span>
+              <span className="text-[11px] text-slate-600 font-mono" title="Posición de inicio en la playlist">
+                @ {formatOffset(startOffset)}
+              </span>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="text-sm text-white truncate">{item.video?.title ?? '—'}</p>
+            <div className="flex items-center gap-2 mt-0.5">
+              {item.video?.duration && (
+                <span className="text-xs text-slate-500">{formatDuration(item.video.duration)}</span>
+              )}
+              <span className="text-[11px] text-slate-600 font-mono" title="Posición de inicio en la playlist">
+                @ {formatOffset(startOffset)}
+              </span>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Flechas ↑↓ */}
@@ -184,6 +212,7 @@ function SortableItem({
 
 export function PlaylistDetail({ playlistId, channelId, onBack }: Props) {
   const [showAddVideo, setShowAddVideo] = useState(false);
+  const [showAddAdBlock, setShowAddAdBlock] = useState(false);
   const [search, setSearch] = useState('');
   const [activeFolder, setActiveFolder] = useState<string | null>(null);
 
@@ -192,7 +221,9 @@ export function PlaylistDetail({ playlistId, channelId, onBack }: Props) {
 
   const { data: playlist, isLoading } = usePlaylist(playlistId);
   const { data: allVideos = [] } = useVideos(channelId);
+  const { data: adBlocks = [] } = useAdBlocks(channelId);
   const addItem     = useAddPlaylistItem();
+  const addAdBlock  = useAddPlaylistAdBlock();
   const removeItem  = useRemovePlaylistItem();
   const reorderItems = useReorderPlaylistItems();
 
@@ -246,7 +277,7 @@ export function PlaylistDetail({ playlistId, channelId, onBack }: Props) {
   }, [readyVideos]);
 
   const itemVideoIds = useMemo(
-    () => new Set(localItems.map((i) => i.video.id)),
+    () => new Set(localItems.filter(i => i.video).map((i) => i.video!.id)),
     [localItems],
   );
 
@@ -262,7 +293,13 @@ export function PlaylistDetail({ playlistId, channelId, onBack }: Props) {
   const openPicker = () => {
     setSearch('');
     setActiveFolder(null);
+    setShowAddAdBlock(false);
     setShowAddVideo(true);
+  };
+
+  const openAdBlockPicker = () => {
+    setShowAddVideo(false);
+    setShowAddAdBlock(true);
   };
 
   // ── Render ──────────────────────────────────────────────────────
@@ -291,24 +328,40 @@ export function PlaylistDetail({ playlistId, channelId, onBack }: Props) {
         <div className="flex-1">
           <h2 className="text-base font-semibold text-white">{playlist.name}</h2>
           <p className="text-xs text-slate-500">
-            {localItems.length} video{localItems.length !== 1 ? 's' : ''}
+            {localItems.length} item{localItems.length !== 1 ? 's' : ''}
             {playlist.totalDuration ? ` · ${formatDuration(playlist.totalDuration)}` : ''}
             {' · '}
             {LOOP_LABELS[playlist.loopMode]}
           </p>
         </div>
-        <button
-          onClick={() => (showAddVideo ? setShowAddVideo(false) : openPicker())}
-          className={cn(
-            'flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
-            showAddVideo
-              ? 'bg-surface-600 text-slate-300 hover:text-white border border-white/10'
-              : 'bg-brand-600 hover:bg-brand-500 text-white',
+        <div className="flex items-center gap-2">
+          {adBlocks.filter(b => b.isActive && b.spots?.length > 0).length > 0 && (
+            <button
+              onClick={() => (showAddAdBlock ? setShowAddAdBlock(false) : openAdBlockPicker())}
+              className={cn(
+                'flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
+                showAddAdBlock
+                  ? 'bg-surface-600 text-slate-300 hover:text-white border border-white/10'
+                  : 'bg-amber-600/80 hover:bg-amber-600 text-white',
+              )}
+            >
+              {showAddAdBlock ? <X className="w-4 h-4" /> : <Megaphone className="w-4 h-4" />}
+              {showAddAdBlock ? 'Cerrar' : 'Insertar publicidad'}
+            </button>
           )}
-        >
-          {showAddVideo ? <X className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
-          {showAddVideo ? 'Cerrar' : 'Agregar video'}
-        </button>
+          <button
+            onClick={() => (showAddVideo ? setShowAddVideo(false) : openPicker())}
+            className={cn(
+              'flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
+              showAddVideo
+                ? 'bg-surface-600 text-slate-300 hover:text-white border border-white/10'
+                : 'bg-brand-600 hover:bg-brand-500 text-white',
+            )}
+          >
+            {showAddVideo ? <X className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+            {showAddVideo ? 'Cerrar' : 'Agregar video'}
+          </button>
+        </div>
       </div>
 
       {/* ── Selector de videos ─────────────────────────────────── */}
@@ -439,6 +492,50 @@ export function PlaylistDetail({ playlistId, channelId, onBack }: Props) {
         </div>
       )}
 
+      {/* ── Selector de bloques publicitarios ──────────────────────── */}
+      {showAddAdBlock && (
+        <div className="glass-card p-4 space-y-3 border-amber-500/20">
+          <p className="text-xs font-semibold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+            <Megaphone className="w-3.5 h-3.5" />
+            Bloques publicitarios disponibles
+          </p>
+          {adBlocks.filter(b => b.isActive && b.spots?.length > 0).length === 0 ? (
+            <p className="text-sm text-slate-500 text-center py-5">
+              No hay bloques publicitarios activos con spots. Crealos en la sección Publicidad.
+            </p>
+          ) : (
+            <div className="space-y-1">
+              {adBlocks
+                .filter(b => b.isActive && b.spots?.length > 0)
+                .map((block) => {
+                  const totalDur = block.spots.reduce((s, sp) => s + (sp.video?.duration ?? 0), 0);
+                  return (
+                    <button
+                      key={block.id}
+                      disabled={addAdBlock.isPending}
+                      onClick={() => addAdBlock.mutate({ playlistId, adBlockId: block.id })}
+                      className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-amber-500/5 transition-colors text-left border border-transparent hover:border-amber-500/20"
+                    >
+                      <div className="w-10 h-7 rounded bg-amber-500/10 flex items-center justify-center flex-shrink-0">
+                        <Megaphone className="w-3.5 h-3.5 text-amber-400" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm text-white truncate">{block.name}</p>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          {block.spots.length} spot{block.spots.length !== 1 ? 's' : ''}
+                          {totalDur > 0 && ` · ${formatDuration(totalDur)}`}
+                          {block.description && ` · ${block.description}`}
+                        </p>
+                      </div>
+                      <Plus className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                    </button>
+                  );
+                })}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── Lista de items con drag-and-drop ──────────────────────── */}
       {localItems.length === 0 ? (
         <div className="glass-card p-12 text-center">
@@ -468,7 +565,10 @@ export function PlaylistDetail({ playlistId, channelId, onBack }: Props) {
                 {localItems.map((item, idx) => {
                   // Calcular posición acumulada (segundos antes de este item)
                   const startOffset = localItems.slice(0, idx).reduce((acc, it) => {
-                    const dur = it.video.duration ?? 0;
+                    if (it.adBlockId && it.adBlock) {
+                      return acc + it.adBlock.spots.reduce((s, sp) => s + (sp.video.duration ?? 0), 0);
+                    }
+                    const dur = it.video?.duration ?? 0;
                     const from = it.trimStart ?? 0;
                     const to   = it.trimEnd   ?? dur;
                     return acc + Math.max(0, to - from);
