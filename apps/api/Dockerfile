@@ -1,4 +1,4 @@
-FROM node:20-slim AS base
+FROM node:22-slim AS base
 RUN npm install -g pnpm
 
 # ─── Instalar dependencias ────────────────────────────────────
@@ -16,7 +16,7 @@ RUN ./node_modules/.bin/prisma generate
 RUN ./node_modules/.bin/nest build
 
 # ─── Imagen final ─────────────────────────────────────────────
-FROM node:20-slim AS runner
+FROM node:22-slim AS runner
 # Instalar FFmpeg + OpenSSL + fuentes DejaVu (drawtext) + cliente de postgres + curl
 # yt-dlp: se descarga el binario standalone para Linux x86_64 (~15 MB, Python incluido).
 # Necesario para extraer la URL directa de streams YouTube Live en el módulo de ingesta.
@@ -24,10 +24,9 @@ RUN apt-get update && \
     apt-get install -y ffmpeg openssl postgresql-client fonts-dejavu-core curl python3 python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
-# Instalar yt-dlp (última versión) y pre-descargar el EJS solver para el n-challenge de YouTube.
-# Node.js (del base image) se usa como JS runtime para ejecutar el solver.
-RUN pip3 install --break-system-packages --no-cache-dir yt-dlp --upgrade && \
-    yt-dlp --update-to ejs@github 2>/dev/null; true
+# yt-dlp con EJS solver (yt-dlp-ejs) para resolver el n-challenge de YouTube.
+# Node.js 22+ (del base image) se usa como JS runtime para ejecutar el solver.
+RUN pip3 install --break-system-packages --no-cache-dir 'yt-dlp[default]' --upgrade
 WORKDIR /app
 ENV NODE_ENV=production
 
