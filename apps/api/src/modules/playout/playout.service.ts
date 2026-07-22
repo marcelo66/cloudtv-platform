@@ -2468,25 +2468,17 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
         const ytArgs: string[] = [
           '--no-playlist',
-          // Node.js como JS runtime para resolver el "n challenge" de YouTube.
-          // --remote-components ejs:github descarga el solver de JS desde GitHub
-          // (requerido desde 2025 para que yt-dlp pueda obtener formatos de video).
           '--js-runtimes', 'node',
-          '--remote-components', 'ejs:github',
+          '--extractor-args', 'youtube:player_client=web_creator,mweb',
+          '--no-cache-dir',
           '-f', 'best[height<=720]/best',
           '-o', '-',
         ];
 
         if (cookiesPath) {
-          // ── Autenticado con cookies.txt ────────────────────────────
           ytArgs.push('--cookies', cookiesPath);
-          ytArgs.push('--no-cache-dir');
-          this.log(session, `INGEST: Cookies YouTube activas (usuario ${userId}) — sin bot-detection`);
+          this.log(session, `INGEST: Cookies YouTube activas (usuario ${userId})`);
         } else {
-          // ── Sin autenticación — fallback por compatibilidad ───────
-          ytArgs.push('--extractor-args', 'youtube:player_client=ios,web');
-          ytArgs.push('--no-cache-dir');
-          // Soporte legacy: cookies.txt via env var
           const cookiesFile = this.config.get<string>('YTDLP_COOKIES_FILE', '');
           const cookiesB64  = this.config.get<string>('YTDLP_COOKIES_B64', '');
           if (cookiesFile) {

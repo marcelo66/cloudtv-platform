@@ -24,10 +24,10 @@ RUN apt-get update && \
     apt-get install -y ffmpeg openssl postgresql-client fonts-dejavu-core curl python3 python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
-# Instalar yt-dlp via pip (soporta plugins externos) + plugin oauth2 para YouTube
-# El plugin yt-dlp-oauth2 de coletdjnz restaura el Device Authorization Flow con
-# client IDs actualizados, eludiendo la revocación de los IDs internos de yt-dlp.
-RUN pip3 install --break-system-packages yt-dlp
+# Instalar yt-dlp (última versión) y pre-descargar el EJS solver para el n-challenge de YouTube.
+# Node.js (del base image) se usa como JS runtime para ejecutar el solver.
+RUN pip3 install --break-system-packages --no-cache-dir yt-dlp --upgrade && \
+    yt-dlp --update-to ejs@github 2>/dev/null; true
 WORKDIR /app
 ENV NODE_ENV=production
 
