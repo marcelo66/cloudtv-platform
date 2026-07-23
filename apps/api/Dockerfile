@@ -1,5 +1,5 @@
 FROM node:22-slim AS base
-RUN npm install -g pnpm
+RUN npm install -g pnpm@10
 
 # ─── Instalar dependencias ────────────────────────────────────
 FROM base AS deps
