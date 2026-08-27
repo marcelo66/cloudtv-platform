@@ -41,6 +41,10 @@ interface PlayoutSession {
   scheduleChangePending: boolean;
   /** Timer del watcher de schedule */
   scheduleWatchTimer: ReturnType<typeof setTimeout> | null;
+  /** Timer del watcher de publicidad (detecta cambios en ad blocks/spots) */
+  adWatchTimer: ReturnType<typeof setTimeout> | null;
+  /** Fingerprint de la publicidad en el último launch (para detectar cambios) */
+  adFingerprint: string | null;
   /** Timer de refresco periódico de temperatura (TEMPERATURE overlays) */
   tempRefreshTimer: ReturnType<typeof setTimeout> | null;
   /** Timer de refresco periódico de RSS (TICKER overlays con textSource='rss') */
@@ -168,6 +172,8 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       activeScheduleId: null,
       scheduleChangePending: false,
       scheduleWatchTimer: null,
+      adWatchTimer: null,
+      adFingerprint: null,
       tempRefreshTimer: null,
       rssRefreshTimer: null,
       bgNormRunning: false,
@@ -233,6 +239,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       if (session.scheduleWatchTimer) {
         clearTimeout(session.scheduleWatchTimer);
         session.scheduleWatchTimer = null;
+      }
+      // Cancelar watcher de publicidad
+      if (session.adWatchTimer) {
+        clearTimeout(session.adWatchTimer);
+        session.adWatchTimer = null;
       }
       // Cancelar timer de refresco de temperatura
       if (session.tempRefreshTimer) {
@@ -317,6 +328,11 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           .map(f => fs.unlink(path.join(session.hlsDir, f)).catch(() => {})),
       );
     } catch { /* no crítico */ }
+    // Limpiar caché de spots publicitarios para forzar re-descarga con datos actuales
+    try {
+      const adsDir = path.join(session.hlsDir, 'ads');
+      await fs.rm(adsDir, { recursive: true, force: true });
+    } catch { /* ok si no existe */ }
 
     // Cancelar cualquier waitForM3u8 anterior
     session.pollToken++;
@@ -609,6 +625,9 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       }
     }
     if (session.stopping) return;
+
+    // Guardar fingerprint de la publicidad actual para el ad watcher
+    session.adFingerprint = await this.computeAdFingerprint(session.channelId);
 
     // ── 4. Construir concat.txt ──────────────────────────────────────────────────
 
@@ -1282,6 +1301,8 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
     // Arrancar el watcher de schedule para detectar cambios de programa
     this.startScheduleWatcher(session);
+    // Arrancar el watcher de publicidad para detectar altas/bajas/cambios de spots
+    this.startAdWatcher(session);
   }
 
   // ─── Polling m3u8 ──────────────────────────────────────────────
@@ -1993,6 +2014,64 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     };
 
     session.scheduleWatchTimer = setTimeout(check, CHECK_MS);
+  }
+
+  // ─── Ad watcher ────────────────────────────────────────────────
+
+  private async computeAdFingerprint(channelId: string): Promise<string> {
+    const blocks = await this.prisma.adBlock.findMany({
+      where: { channelId },
+      select: {
+        id: true, isActive: true, rotationMode: true,
+        spots: {
+          select: { id: true, videoId: true, isActive: true, weight: true, order: true },
+          orderBy: { order: 'asc' },
+        },
+      },
+      orderBy: { id: 'asc' },
+    });
+    const cuePoints = await this.prisma.cuePoint.findMany({
+      where: { channelId },
+      select: { id: true, videoId: true, adBlockId: true, type: true, isActive: true, timeOffset: true },
+      orderBy: { id: 'asc' },
+    });
+    const channel = await this.prisma.channel.findUnique({
+      where: { id: channelId },
+      select: { adIntervalMinutes: true, adIntervalBlockId: true },
+    });
+    return JSON.stringify({ blocks, cuePoints, interval: channel });
+  }
+
+  private startAdWatcher(session: PlayoutSession): void {
+    if (session.adWatchTimer) {
+      clearTimeout(session.adWatchTimer);
+      session.adWatchTimer = null;
+    }
+
+    const CHECK_MS = 30_000;
+
+    const check = async () => {
+      if (session.stopping || !this.sessions.has(session.channelId)) return;
+      try {
+        const currentFp = await this.computeAdFingerprint(session.channelId);
+        if (currentFp !== session.adFingerprint) {
+          this.log(
+            session,
+            'Cambio en publicidad detectado (spots/tandas/cue points) → reconstruyendo emisión',
+          );
+          session.scheduleChangePending = true;
+          this.killSession(session);
+          return;
+        }
+      } catch (err: any) {
+        this.log(session, `WARN ad watcher: ${err.message}`);
+      }
+      if (!session.stopping && this.sessions.has(session.channelId)) {
+        session.adWatchTimer = setTimeout(check, CHECK_MS);
+      }
+    };
+
+    session.adWatchTimer = setTimeout(check, CHECK_MS);
   }
 
   /** Devuelve el schedule activo con sus tandas incluidas (para playout). */
