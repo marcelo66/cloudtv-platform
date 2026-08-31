@@ -35,4 +35,8 @@ export class UpdateScheduleDto {
   @IsString()
   @IsOptional()
   postAdBlockId?: string | null;
+
+  @IsString()
+  @IsOptional()
+  ingestSourceId?: string | null;
 }

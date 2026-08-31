@@ -34,6 +34,7 @@ import {
 } from '@/hooks/usePlaylists';
 import { useVideos } from '@/hooks/useVideos';
 import { useAdBlocks } from '@/hooks/useAdBlocks';
+import { useSchedules } from '@/hooks/useSchedules';
 import { formatDuration } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 
@@ -62,12 +63,19 @@ function formatOffset(seconds: number): string {
   return `${mm}:${ss}`;
 }
 
+/** Dado un Date base + offset en segundos, devuelve "HH:MM" en hora local */
+function formatClockTime(base: Date, offsetSeconds: number): string {
+  const d = new Date(base.getTime() + offsetSeconds * 1000);
+  return d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
 interface SortableItemProps {
   item: PlaylistItem;
   idx: number;
   total: number;
   playlistId: string;
   startOffset: number;   // segundos acumulados antes de este item
+  scheduleBase: Date | null; // si hay schedule, hora de inicio para mostrar hora absoluta
   onMoveUp: () => void;
   onMoveDown: () => void;
   onRemove: () => void;
@@ -79,6 +87,7 @@ function SortableItem({
   idx,
   total,
   startOffset,
+  scheduleBase,
   onMoveUp,
   onMoveDown,
   onRemove,
@@ -156,9 +165,15 @@ function SortableItem({
                 {' · '}
                 {formatDuration(item.adBlock.spots.reduce((s, sp) => s + (sp.video.duration ?? 0), 0))}
               </span>
-              <span className="text-[11px] text-slate-600 font-mono" title="Posición de inicio en la playlist">
-                @ {formatOffset(startOffset)}
-              </span>
+              {scheduleBase ? (
+                <span className="text-[11px] text-brand-400 font-mono font-semibold" title={`Offset: ${formatOffset(startOffset)}`}>
+                  {formatClockTime(scheduleBase, startOffset)}
+                </span>
+              ) : (
+                <span className="text-[11px] text-slate-600 font-mono" title="Posición de inicio en la playlist">
+                  @ {formatOffset(startOffset)}
+                </span>
+              )}
             </div>
           </>
         ) : (
@@ -168,9 +183,15 @@ function SortableItem({
               {item.video?.duration && (
                 <span className="text-xs text-slate-500">{formatDuration(item.video.duration)}</span>
               )}
-              <span className="text-[11px] text-slate-600 font-mono" title="Posición de inicio en la playlist">
-                @ {formatOffset(startOffset)}
-              </span>
+              {scheduleBase ? (
+                <span className="text-[11px] text-brand-400 font-mono font-semibold" title={`Offset: ${formatOffset(startOffset)}`}>
+                  {formatClockTime(scheduleBase, startOffset)}
+                </span>
+              ) : (
+                <span className="text-[11px] text-slate-600 font-mono" title="Posición de inicio en la playlist">
+                  @ {formatOffset(startOffset)}
+                </span>
+              )}
             </div>
           </>
         )}
@@ -222,6 +243,14 @@ export function PlaylistDetail({ playlistId, channelId, onBack }: Props) {
   const { data: playlist, isLoading } = usePlaylist(playlistId);
   const { data: allVideos = [] } = useVideos(channelId);
   const { data: adBlocks = [] } = useAdBlocks(channelId);
+  const { data: allSchedules = [] } = useSchedules(channelId);
+
+  // Si esta playlist está vinculada a un schedule, usar su startTime como base para mostrar hora absoluta
+  const scheduleBase = useMemo(() => {
+    const sch = allSchedules.find(s => s.playlistId === playlistId);
+    if (!sch) return null;
+    return new Date(sch.startTime);
+  }, [allSchedules, playlistId]);
   const addItem     = useAddPlaylistItem();
   const addAdBlock  = useAddPlaylistAdBlock();
   const removeItem  = useRemovePlaylistItem();
@@ -332,6 +361,11 @@ export function PlaylistDetail({ playlistId, channelId, onBack }: Props) {
             {playlist.totalDuration ? ` · ${formatDuration(playlist.totalDuration)}` : ''}
             {' · '}
             {LOOP_LABELS[playlist.loopMode]}
+            {scheduleBase && (
+              <span className="text-brand-400 ml-1">
+                · Inicio: {scheduleBase.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', hour12: false })}
+              </span>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -581,6 +615,7 @@ export function PlaylistDetail({ playlistId, channelId, onBack }: Props) {
                       total={localItems.length}
                       playlistId={playlistId}
                       startOffset={startOffset}
+                      scheduleBase={scheduleBase}
                       isReordering={reorderItems.isPending}
                       onMoveUp={() => handleMoveItem(idx, idx - 1)}
                       onMoveDown={() => handleMoveItem(idx, idx + 1)}

@@ -18,6 +18,8 @@ export interface Schedule {
   postAdBlock?: { id: string; name: string } | null;
   fillerPlaylistId?: string | null;
   fillerPlaylist?: { id: string; name: string } | null;
+  ingestSourceId?: string | null;
+  ingestSource?: { id: string; name: string; type: string } | null;
   createdAt: string;
 }
 
@@ -48,6 +50,7 @@ export function useCreateSchedule() {
       preAdBlockId?: string;
       postAdBlockId?: string;
       fillerPlaylistId?: string;
+      ingestSourceId?: string;
     }) => apiClient.post('/schedules', dto),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['schedules'] });

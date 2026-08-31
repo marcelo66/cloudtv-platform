@@ -39,6 +39,8 @@ interface PlayoutSession {
   activeScheduleId: string | null;
   /** true → el schedule cambió mientras corría; reiniciar sin contar como fallo */
   scheduleChangePending: boolean;
+  /** ID del schedule de ingesta activo (para detectar fin de ventana) */
+  activeIngestScheduleId: string | null;
   /** Timer del watcher de schedule */
   scheduleWatchTimer: ReturnType<typeof setTimeout> | null;
   /** Timer del watcher de publicidad (detecta cambios en ad blocks/spots) */
@@ -171,6 +173,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       pollToken: 0,
       activeScheduleId: null,
       scheduleChangePending: false,
+      activeIngestScheduleId: null,
       scheduleWatchTimer: null,
       adWatchTimer: null,
       adFingerprint: null,
@@ -1993,16 +1996,42 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     const check = async () => {
       if (session.stopping || !this.sessions.has(session.channelId)) return;
       try {
-        const entry = await this.getActiveScheduleEntry(session.channelId);
-        const newId = entry?.id ?? null;
-        if (newId !== session.activeScheduleId) {
-          this.log(
-            session,
-            `Cambio de programa detectado (${session.activeScheduleId ?? 'default'} → ${newId ?? 'default'}) → reconstruyendo emisión`,
-          );
-          session.scheduleChangePending = true;
-          this.killSession(session);
-          return; // El handler 'close' relanzará y llamará a startScheduleWatcher de nuevo
+        // 1. Verificar si hay un schedule de ingesta vigente
+        const ingestSch = await this.getActiveIngestSchedule(session.channelId);
+        const ingestSchId = ingestSch?.id ?? null;
+
+        if (ingestSchId && ingestSchId !== session.activeIngestScheduleId) {
+          // Entró un schedule de ingesta → activar la fuente
+          session.activeIngestScheduleId = ingestSchId;
+          const source = ingestSch!.ingestSource;
+          if (source) {
+            this.log(session, `Ingesta programada: "${ingestSch!.name}" → activando "${source.name}" [${source.type}]`);
+            // Usar activateIngest internamente (sin verificar userId ya que es automático)
+            await this.activateIngestInternal(session, source);
+          }
+          // No reprogramar — el siguiente check se hará abajo
+        } else if (!ingestSchId && session.activeIngestScheduleId) {
+          // El schedule de ingesta terminó → desactivar y retomar programación
+          session.activeIngestScheduleId = null;
+          if (session.activeIngestId) {
+            this.log(session, 'Ingesta programada finalizada → retomando programación normal');
+            await this.deactivateIngestInternal(session);
+          }
+        }
+
+        // 2. Verificar cambio de schedule de playlist (solo si NO hay ingesta activa)
+        if (!session.activeIngestId) {
+          const entry = await this.getActiveScheduleEntry(session.channelId);
+          const newId = entry?.id ?? null;
+          if (newId !== session.activeScheduleId) {
+            this.log(
+              session,
+              `Cambio de programa detectado (${session.activeScheduleId ?? 'default'} → ${newId ?? 'default'}) → reconstruyendo emisión`,
+            );
+            session.scheduleChangePending = true;
+            this.killSession(session);
+            return;
+          }
         }
       } catch (err: any) {
         this.log(session, `WARN schedule watcher: ${err.message}`);
@@ -2083,7 +2112,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       orderBy: { order: 'asc' as const },
     };
     return this.prisma.schedule.findFirst({
-      where: { channelId, playlistId: { not: null }, startTime: { lte: now }, endTime: { gte: now } },
+      where: { channelId, playlistId: { not: null }, ingestSourceId: null, startTime: { lte: now }, endTime: { gte: now } },
       orderBy: { priority: 'desc' },
       include: {
         preAdBlock: {
@@ -2093,6 +2122,16 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
           include: { spots: spotSelect },
         },
       },
+    });
+  }
+
+  /** Devuelve el schedule de ingesta activo (si hay uno vigente ahora). */
+  private getActiveIngestSchedule(channelId: string) {
+    const now = new Date();
+    return this.prisma.schedule.findFirst({
+      where: { channelId, ingestSourceId: { not: null }, startTime: { lte: now }, endTime: { gte: now } },
+      orderBy: { priority: 'desc' },
+      include: { ingestSource: true },
     });
   }
 
@@ -2496,6 +2535,63 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     });
 
     return { success: true, message: 'Ingesta desactivada. Retomando programación normal.' };
+  }
+
+  /** Activa ingesta desde el schedule watcher (sin userId, ya verificado). */
+  private async activateIngestInternal(session: PlayoutSession, source: any): Promise<void> {
+    const ingestId = source.id;
+
+    if (session.activeIngestId && session.activeIngestId !== ingestId) {
+      const prevId = session.activeIngestId;
+      session.activeIngestId = null;
+      if (session.ytDlpProcess && !session.ytDlpProcess.killed) {
+        try { session.ytDlpProcess.kill('SIGTERM'); } catch { /* ok */ }
+      }
+      session.ytDlpProcess = null;
+      if (session.ingestProcess && !session.ingestProcess.killed) {
+        try { session.ingestProcess.kill('SIGTERM'); } catch { /* ok */ }
+      }
+      session.ingestProcess = null;
+      await this.prisma.ingestSource.update({ where: { id: prevId }, data: { status: 'IDLE' } }).catch(() => {});
+    }
+
+    session.activeIngestId = ingestId;
+
+    if (session.process && !session.process.killed) {
+      this.killSession(session);
+    }
+    this.stopRtmpOutputs(session, false);
+
+    await this.prisma.ingestSource.update({ where: { id: ingestId }, data: { status: 'ACTIVE' } }).catch(() => {});
+    await this.prisma.channel.update({ where: { id: session.channelId }, data: { status: 'STARTING' } }).catch(() => {});
+
+    this.launchIngestFfmpeg(session, source).catch((err) => {
+      this.log(session, `ERROR launchIngestFfmpeg (programada): ${err.message}`);
+    });
+  }
+
+  /** Desactiva ingesta desde el schedule watcher (sin userId). */
+  private async deactivateIngestInternal(session: PlayoutSession): Promise<void> {
+    const ingestId = session.activeIngestId;
+    if (!ingestId) return;
+
+    session.activeIngestId = null;
+
+    if (session.ytDlpProcess && !session.ytDlpProcess.killed) {
+      try { session.ytDlpProcess.kill('SIGTERM'); } catch { /* ok */ }
+    }
+    session.ytDlpProcess = null;
+    if (session.ingestProcess && !session.ingestProcess.killed) {
+      try { session.ingestProcess.kill('SIGTERM'); } catch { /* ok */ }
+    }
+    session.ingestProcess = null;
+
+    await this.prisma.ingestSource.update({ where: { id: ingestId }, data: { status: 'IDLE' } }).catch(() => {});
+    this.stopRtmpOutputs(session, false);
+
+    this.launchFfmpeg(session).catch((err) => {
+      this.log(session, `ERROR retomando playlist (fin de ingesta programada): ${err.message}`);
+    });
   }
 
   // ─── Ingest privado ───────────────────────────────────────────

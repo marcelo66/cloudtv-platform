@@ -1,10 +1,11 @@
 'use client';
 
 import { useState, useMemo } from 'react';
-import { X, CalendarClock, Clapperboard, Clock, Info } from 'lucide-react';
+import { X, CalendarClock, Clapperboard, Clock, Info, Radio } from 'lucide-react';
 import { useCreateSchedule, useUpdateSchedule, Schedule } from '@/hooks/useSchedules';
 import { usePlaylists } from '@/hooks/usePlaylists';
 import { useAdBlocks } from '@/hooks/useAdBlocks';
+import { useIngestSources } from '@/hooks/useIngest';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -58,6 +59,7 @@ export function CreateScheduleModal({ channelId, initialStart, schedule, onClose
   const update = useUpdateSchedule();
   const { data: playlists = [] } = usePlaylists(channelId);
   const { data: adBlocks = [] } = useAdBlocks(channelId);
+  const { data: ingestSources = [] } = useIngestSources(channelId);
 
   // Valores iniciales: del schedule existente (edit) o defaults (create)
   const defaultStart = toLocalDatetimeValue(schedule?.startTime ?? initialStart);
@@ -69,8 +71,11 @@ export function CreateScheduleModal({ channelId, initialStart, schedule, onClose
         return d.toISOString().slice(0, 16);
       })();
 
+  type ContentType = 'playlist' | 'ingest';
+  const [contentType,  setContentType]  = useState<ContentType>(schedule?.ingestSourceId ? 'ingest' : 'playlist');
   const [name,         setName]         = useState(schedule?.name ?? '');
   const [playlistId,   setPlaylistId]   = useState(schedule?.playlistId ?? '');
+  const [ingestSourceId, setIngestSourceId] = useState(schedule?.ingestSourceId ?? '');
   const [startTime,    setStartTime]    = useState(defaultStart);
   const [endTime,      setEndTime]      = useState(defaultEnd);
   type Recurrence = 'ONCE' | 'DAILY' | 'WEEKLY' | 'WEEKDAYS' | 'WEEKENDS';
@@ -105,17 +110,19 @@ export function CreateScheduleModal({ channelId, initialStart, schedule, onClose
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !slotValid) return;
+    if (contentType === 'ingest' && !ingestSourceId) return;
 
     const payload = {
       name:          name.trim(),
-      playlistId:    playlistId || undefined,
+      playlistId:    contentType === 'playlist' ? (playlistId || undefined) : undefined,
+      ingestSourceId: contentType === 'ingest' ? (ingestSourceId || undefined) : undefined,
       startTime:     new Date(startTime).toISOString(),
       endTime:       new Date(endTime).toISOString(),
       recurrence,
       priority,
-      preAdBlockId:     preAdBlockId     || undefined,
-      postAdBlockId:    postAdBlockId    || undefined,
-      fillerPlaylistId: fillerPlaylistId || undefined,
+      preAdBlockId:     contentType === 'playlist' ? (preAdBlockId     || undefined) : undefined,
+      postAdBlockId:    contentType === 'playlist' ? (postAdBlockId    || undefined) : undefined,
+      fillerPlaylistId: contentType === 'playlist' ? (fillerPlaylistId || undefined) : undefined,
     };
 
     if (isEdit) {
@@ -210,53 +217,114 @@ export function CreateScheduleModal({ channelId, initialStart, schedule, onClose
             </div>
           </div>
 
-          {/* Playlist + fit indicator */}
-          <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1.5">
-              Playlist <span className="text-slate-600">(opcional)</span>
-            </label>
-            <select
-              value={playlistId}
-              onChange={(e) => setPlaylistId(e.target.value)}
-              className={inputClass}
-            >
-              <option value="">— Sin playlist —</option>
-              {playlists.map((pl) => (
-                <option key={pl.id} value={pl.id}>
-                  {pl.name}
-                  {pl.totalDuration ? ` (${formatDur(pl.totalDuration)})` : ''}
-                </option>
-              ))}
-            </select>
-
-            {/* Fit indicator */}
-            {fitInfo && (
-              <div className={cn(
-                'mt-2 flex items-start gap-2 px-3 py-2 rounded-lg border text-xs',
-                fitInfo.bg,
-              )}>
-                <span className={cn('text-base leading-none mt-0.5 flex-shrink-0', fitInfo.color)}>
-                  {fitInfo.icon}
-                </span>
-                <div>
-                  <span className={cn('font-medium', fitInfo.color)}>{fitInfo.text}</span>
-                  {plDuration && (
-                    <span className="text-slate-500 ml-1">
-                      (playlist: {formatDur(plDuration)})
-                    </span>
+          {/* Content type toggle */}
+          {ingestSources.length > 0 && (
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">Tipo de contenido</label>
+              <div className="flex rounded-lg border border-white/10 overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setContentType('playlist')}
+                  className={cn(
+                    'flex-1 px-3 py-2 text-xs font-medium flex items-center justify-center gap-1.5 transition-colors',
+                    contentType === 'playlist'
+                      ? 'bg-brand-600/20 text-white'
+                      : 'text-slate-400 hover:text-white hover:bg-white/5',
                   )}
-                </div>
+                >
+                  <Clapperboard className="w-3.5 h-3.5" />
+                  Playlist
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setContentType('ingest')}
+                  className={cn(
+                    'flex-1 px-3 py-2 text-xs font-medium flex items-center justify-center gap-1.5 transition-colors border-l border-white/10',
+                    contentType === 'ingest'
+                      ? 'bg-red-600/20 text-red-300'
+                      : 'text-slate-400 hover:text-white hover:bg-white/5',
+                  )}
+                >
+                  <Radio className="w-3.5 h-3.5" />
+                  Ingesta en vivo
+                </button>
               </div>
-            )}
+            </div>
+          )}
 
-            {/* Sin playlist seleccionada pero con duración de bloque */}
-            {!playlistId && slotValid && playlists.length > 0 && (
-              <p className="mt-1.5 text-[11px] text-slate-600 flex items-center gap-1">
-                <Info className="w-3 h-3" />
-                Seleccioná una playlist para ver si encaja en el bloque de {slotLabel}
+          {/* Playlist selector (when content type = playlist) */}
+          {contentType === 'playlist' && (
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">
+                Playlist <span className="text-slate-600">(opcional)</span>
+              </label>
+              <select
+                value={playlistId}
+                onChange={(e) => setPlaylistId(e.target.value)}
+                className={inputClass}
+              >
+                <option value="">— Sin playlist —</option>
+                {playlists.map((pl) => (
+                  <option key={pl.id} value={pl.id}>
+                    {pl.name}
+                    {pl.totalDuration ? ` (${formatDur(pl.totalDuration)})` : ''}
+                  </option>
+                ))}
+              </select>
+
+              {fitInfo && (
+                <div className={cn(
+                  'mt-2 flex items-start gap-2 px-3 py-2 rounded-lg border text-xs',
+                  fitInfo.bg,
+                )}>
+                  <span className={cn('text-base leading-none mt-0.5 flex-shrink-0', fitInfo.color)}>
+                    {fitInfo.icon}
+                  </span>
+                  <div>
+                    <span className={cn('font-medium', fitInfo.color)}>{fitInfo.text}</span>
+                    {plDuration && (
+                      <span className="text-slate-500 ml-1">
+                        (playlist: {formatDur(plDuration)})
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {!playlistId && slotValid && playlists.length > 0 && (
+                <p className="mt-1.5 text-[11px] text-slate-600 flex items-center gap-1">
+                  <Info className="w-3 h-3" />
+                  Seleccioná una playlist para ver si encaja en el bloque de {slotLabel}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Ingest source selector (when content type = ingest) */}
+          {contentType === 'ingest' && (
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">
+                Fuente de ingesta <span className="text-red-400">*</span>
+              </label>
+              <select
+                value={ingestSourceId}
+                onChange={(e) => setIngestSourceId(e.target.value)}
+                className={inputClass}
+              >
+                <option value="">— Seleccionar fuente —</option>
+                {ingestSources.map((src) => (
+                  <option key={src.id} value={src.id}>
+                    {src.name} ({src.type})
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1.5 text-[11px] text-slate-600 flex items-start gap-1 leading-relaxed">
+                <Info className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                La programación normal se pausará automáticamente durante este bloque y se activará la ingesta en vivo.
+                Al finalizar el horario, se retoma la programación.
               </p>
-            )}
-          </div>
+            </div>
+          )}
 
           {/* Recurrence */}
           <div>
@@ -287,8 +355,8 @@ export function CreateScheduleModal({ channelId, initialStart, schedule, onClose
             />
           </div>
 
-          {/* Publicidad del programa */}
-          {adBlocks.length > 0 && (
+          {/* Publicidad del programa (solo para playlist, no para ingesta) */}
+          {contentType === 'playlist' && adBlocks.length > 0 && (
             <div className="rounded-xl border border-white/8 bg-surface-700/30 p-4 space-y-3">
               <div className="flex items-center gap-2">
                 <Clapperboard className="w-3.5 h-3.5 text-amber-400" />
@@ -318,8 +386,8 @@ export function CreateScheduleModal({ channelId, initialStart, schedule, onClose
             </div>
           )}
 
-          {/* Playlist de relleno */}
-          {playlists.length > 0 && (
+          {/* Playlist de relleno (solo para playlist, no para ingesta) */}
+          {contentType === 'playlist' && playlists.length > 0 && (
             <div className="rounded-lg border border-white/5 bg-white/[0.02] p-3 space-y-2">
               <div className="flex items-center gap-2">
                 <Clapperboard className="w-3.5 h-3.5 text-slate-500" />
@@ -353,7 +421,7 @@ export function CreateScheduleModal({ channelId, initialStart, schedule, onClose
             </button>
             <button
               type="submit"
-              disabled={!name.trim() || !slotValid || isLoading}
+              disabled={!name.trim() || !slotValid || isLoading || (contentType === 'ingest' && !ingestSourceId)}
               className="flex-1 px-4 py-2 rounded-lg text-sm font-medium bg-brand-600 hover:bg-brand-500 text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isLoading ? 'Guardando...' : isEdit ? 'Guardar cambios' : 'Crear'}

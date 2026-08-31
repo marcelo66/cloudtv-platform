@@ -30,6 +30,7 @@ export class SchedulesService {
     fillerPlaylist: { select: { id: true, name: true } },
     preAdBlock:     { select: { id: true, name: true } },
     postAdBlock:    { select: { id: true, name: true } },
+    ingestSource:   { select: { id: true, name: true, type: true } },
   } as const;
 
   async create(dto: CreateScheduleDto, userId: string) {
@@ -42,7 +43,7 @@ export class SchedulesService {
     return this.prisma.schedule.create({
       data: {
         channelId:    dto.channelId,
-        playlistId:   dto.playlistId,
+        playlistId:   dto.ingestSourceId ? undefined : dto.playlistId,
         name:         dto.name,
         startTime:    start,
         endTime:      end,
@@ -51,6 +52,7 @@ export class SchedulesService {
         preAdBlockId:    dto.preAdBlockId,
         postAdBlockId:   dto.postAdBlockId,
         fillerPlaylistId: dto.fillerPlaylistId,
+        ingestSourceId:  dto.ingestSourceId,
       },
       include: this.scheduleInclude,
     });

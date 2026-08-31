@@ -196,6 +196,9 @@ model Schedule {
   // Playlist de relleno: si el contenido del slot es más corto que su duración, completa con esta playlist
   fillerPlaylistId  String?    @map("filler_playlist_id")
   fillerPlaylist    Playlist?  @relation("ScheduleFiller", fields: [fillerPlaylistId], references: [id])
+  // Ingesta programada: si se define, este slot activa una fuente de ingesta en lugar de una playlist
+  ingestSourceId    String?       @map("ingest_source_id")
+  ingestSource      IngestSource? @relation(fields: [ingestSourceId], references: [id])
   createdAt     DateTime   @default(now()) @map("created_at")
 
   @@map("schedules")
@@ -276,6 +279,8 @@ model IngestSource {
   status    IngestStatus @default(IDLE)
   createdAt DateTime     @default(now()) @map("created_at")
   updatedAt DateTime     @updatedAt @map("updated_at")
+
+  schedules Schedule[]
 
   @@map("ingest_sources")
 }

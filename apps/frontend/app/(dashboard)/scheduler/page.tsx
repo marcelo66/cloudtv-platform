@@ -11,6 +11,7 @@ import {
   CalendarDays,
   RefreshCw,
   Pencil,
+  Radio,
 } from 'lucide-react';
 import { Header } from '@/components/dashboard/Header';
 import { CreateScheduleModal } from '@/components/scheduler/CreateScheduleModal';
@@ -400,7 +401,10 @@ function WeekView({
                 const endMin   = minutesFromMidnight(sch.endTime);
                 const top      = (startMin / 60) * CELL_HEIGHT;
                 const height   = Math.max(((endMin - startMin) / 60) * CELL_HEIGHT, 20);
-                const colorClass = TRACK_COLORS[idx % TRACK_COLORS.length];
+                const isIngest = !!sch.ingestSourceId;
+                const colorClass = isIngest
+                  ? 'bg-red-600/30 border-red-500/50 text-red-300'
+                  : TRACK_COLORS[idx % TRACK_COLORS.length];
                 const dur = slotDur(sch.startTime, sch.endTime);
 
                 return (
@@ -415,7 +419,10 @@ function WeekView({
                   >
                     <div className="px-1.5 pt-1 flex items-start justify-between gap-1">
                       <div className="flex-1 min-w-0">
-                        <p className="text-xs font-semibold leading-tight truncate">{sch.name}</p>
+                        <p className="text-xs font-semibold leading-tight truncate flex items-center gap-1">
+                          {isIngest && <Radio className="w-2.5 h-2.5 flex-shrink-0" />}
+                          {sch.name}
+                        </p>
                         {height > 28 && (
                           <p className="text-[10px] opacity-70 truncate leading-tight">
                             {formatTime(sch.startTime)} – {formatTime(sch.endTime)}
@@ -423,7 +430,7 @@ function WeekView({
                         )}
                         {height > 42 && (
                           <p className="text-[10px] opacity-60 truncate leading-tight">
-                            ⏱ {fmtDur(dur)}
+                            {isIngest ? `EN VIVO · ${fmtDur(dur)}` : `⏱ ${fmtDur(dur)}`}
                           </p>
                         )}
                       </div>
@@ -515,9 +522,16 @@ function ListView({
 
             {/* Info */}
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-white truncate">{sch.name}</p>
+              <p className="text-sm font-medium text-white truncate flex items-center gap-1.5">
+                {sch.ingestSourceId && <Radio className="w-3 h-3 text-red-400 flex-shrink-0" />}
+                {sch.name}
+              </p>
               <p className="text-xs text-slate-500 truncate">
-                {sch.playlist ? sch.playlist.name : 'Sin playlist asignada'}
+                {sch.ingestSource
+                  ? `Ingesta: ${sch.ingestSource.name} (${sch.ingestSource.type})`
+                  : sch.playlist
+                    ? sch.playlist.name
+                    : 'Sin playlist asignada'}
               </p>
             </div>
 

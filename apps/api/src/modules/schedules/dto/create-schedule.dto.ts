@@ -44,4 +44,9 @@ export class CreateScheduleDto {
   @IsString()
   @IsOptional()
   fillerPlaylistId?: string;
+
+  /** ID de la fuente de ingesta a activar durante este slot (alternativa a playlistId) */
+  @IsString()
+  @IsOptional()
+  ingestSourceId?: string;
 }
