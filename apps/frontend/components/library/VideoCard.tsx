@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import Image from 'next/image';
 import { MoreHorizontal, Pencil, Trash2, Film, Check, X, Folder, FolderInput, RefreshCw } from 'lucide-react';
 import { Video } from '@/hooks/useVideos';
@@ -159,52 +160,42 @@ export function VideoCard({ video, folders = [], onUpdate, onDelete, onRenormali
           )}
 
           {/* Kebab menu */}
-          <div className="relative flex-shrink-0">
+          <DropdownMenu
+            open={menuOpen}
+            onToggle={() => setMenuOpen(!menuOpen)}
+            onClose={() => setMenuOpen(false)}
+          >
             <button
-              onClick={() => setMenuOpen(!menuOpen)}
-              className="w-6 h-6 flex items-center justify-center rounded text-slate-500 hover:text-white hover:bg-white/10 transition-colors"
+              onClick={() => { setEditing(true); setMenuOpen(false); }}
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-300 hover:bg-white/5 hover:text-white transition-colors"
             >
-              <MoreHorizontal className="w-4 h-4" />
+              <Pencil className="w-3.5 h-3.5" />
+              Renombrar
             </button>
-
-            {menuOpen && (
-              <>
-                <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
-                <div className="absolute right-0 top-7 z-20 w-40 rounded-lg border border-white/10 bg-surface-600 shadow-xl overflow-hidden">
-                  <button
-                    onClick={() => { setEditing(true); setMenuOpen(false); }}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-300 hover:bg-white/5 hover:text-white transition-colors"
-                  >
-                    <Pencil className="w-3.5 h-3.5" />
-                    Renombrar
-                  </button>
-                  <button
-                    onClick={openFolderEditor}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-300 hover:bg-white/5 hover:text-white transition-colors"
-                  >
-                    <FolderInput className="w-3.5 h-3.5" />
-                    Mover a carpeta
-                  </button>
-                  {onRenormalize && (video.status === 'READY' || video.status === 'ERROR') && (
-                    <button
-                      onClick={() => { onRenormalize(video.id); setMenuOpen(false); }}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-300 hover:bg-white/5 hover:text-white transition-colors"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" />
-                      Re-normalizar
-                    </button>
-                  )}
-                  <button
-                    onClick={() => { onDelete(video.id); setMenuOpen(false); }}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 transition-colors"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    Eliminar
-                  </button>
-                </div>
-              </>
+            <button
+              onClick={openFolderEditor}
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-300 hover:bg-white/5 hover:text-white transition-colors"
+            >
+              <FolderInput className="w-3.5 h-3.5" />
+              Mover a carpeta
+            </button>
+            {onRenormalize && (video.status === 'READY' || video.status === 'ERROR') && (
+              <button
+                onClick={() => { onRenormalize(video.id); setMenuOpen(false); }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-300 hover:bg-white/5 hover:text-white transition-colors"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                Re-normalizar
+              </button>
             )}
-          </div>
+            <button
+              onClick={() => { onDelete(video.id); setMenuOpen(false); }}
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 transition-colors"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Eliminar
+            </button>
+          </DropdownMenu>
         </div>
 
         {/* ── Editor de carpeta inline ─────────────────────────── */}
@@ -278,6 +269,48 @@ export function VideoCard({ video, folders = [], onUpdate, onDelete, onRenormali
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function DropdownMenu({ open, onToggle, onClose, children }: {
+  open: boolean;
+  onToggle: () => void;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
+
+  useEffect(() => {
+    if (open && btnRef.current) {
+      const r = btnRef.current.getBoundingClientRect();
+      setPos({ top: r.bottom + 4, left: r.right - 160 });
+    }
+  }, [open]);
+
+  return (
+    <div className="flex-shrink-0">
+      <button
+        ref={btnRef}
+        onClick={onToggle}
+        className="w-6 h-6 flex items-center justify-center rounded text-slate-500 hover:text-white hover:bg-white/10 transition-colors"
+      >
+        <MoreHorizontal className="w-4 h-4" />
+      </button>
+
+      {open && createPortal(
+        <>
+          <div className="fixed inset-0 z-[9998]" onClick={onClose} />
+          <div
+            className="fixed z-[9999] w-40 rounded-lg border border-white/10 bg-surface-600 shadow-xl overflow-hidden"
+            style={{ top: pos.top, left: Math.max(8, pos.left) }}
+          >
+            {children}
+          </div>
+        </>,
+        document.body,
+      )}
     </div>
   );
 }

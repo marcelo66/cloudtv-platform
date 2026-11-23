@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import Image from 'next/image';
 import {
   Clapperboard,
@@ -1303,7 +1304,7 @@ function DiagnosticsTab({ channelId }: { channelId: string }) {
 // ─── Reusable Modal wrapper ───────────────────────────────────
 
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
       <div className="relative bg-surface-800 border border-white/10 rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
@@ -1315,6 +1316,7 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
         </div>
         <div className="p-6">{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
