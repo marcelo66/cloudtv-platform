@@ -701,7 +701,7 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     // ── Auditoría de publicidad: registrar qué spots se incluyeron ──────────────
     {
       const totalBlocks = new Set([
-        ...cuePoints.map(cp => cp.adBlockId),
+        ...cuePoints.map(cp => cp.adBlock.id),
         ...(scheduleEntry?.preAdBlock ? [scheduleEntry.preAdBlock.id] : []),
         ...(scheduleEntry?.postAdBlock ? [scheduleEntry.postAdBlock.id] : []),
         ...(intervalBlock ? [intervalBlock.id] : []),
