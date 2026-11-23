@@ -232,6 +232,72 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
     return path.join(HLS_BASE, channelId, filename);
   }
 
+  forceRefreshAds(channelId: string) {
+    const session = this.sessions.get(channelId);
+    if (!session) return { ok: false, message: 'Canal no está activo' };
+    if (session.activeIngestId) return { ok: false, message: 'Canal en modo ingesta' };
+    this.log(session, '[MANUAL] Forzando reconstrucción de publicidad (refresh-ads)');
+    session.scheduleChangePending = true;
+    this.killSession(session);
+    return { ok: true, message: 'Reconstrucción de publicidad iniciada' };
+  }
+
+  async getAdDiagnostics(channelId: string) {
+    const session = this.sessions.get(channelId);
+    const blocks = await this.prisma.adBlock.findMany({
+      where: { channelId },
+      select: {
+        id: true, name: true, isActive: true, rotationMode: true,
+        spots: {
+          select: {
+            id: true, name: true, advertiser: true, isActive: true, weight: true,
+            video: { select: { id: true, title: true, status: true, processedKey: true, originalKey: true, duration: true } },
+          },
+          orderBy: { order: 'asc' },
+        },
+        _count: { select: { cuePoints: true, impressions: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const lastBuild = await this.prisma.playoutLog.findFirst({
+      where: { channelId, event: 'AD_BUILD' },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const recentBuilds = await this.prisma.playoutLog.findMany({
+      where: { channelId, event: 'AD_BUILD' },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+    });
+
+    const diagnostics = blocks.map((b) => {
+      const activeSpots = b.spots.filter(s => s.isActive);
+      const readySpots = activeSpots.filter(s => s.video.status === 'READY' && (s.video.processedKey || s.video.originalKey));
+      const issues: string[] = [];
+      if (!b.isActive) issues.push('Tanda desactivada');
+      if (activeSpots.length === 0) issues.push('Sin spots activos');
+      for (const s of activeSpots) {
+        if (s.video.status !== 'READY') issues.push(`Spot "${s.name}": video en estado ${s.video.status}`);
+        else if (!s.video.processedKey && !s.video.originalKey) issues.push(`Spot "${s.name}": video sin archivo de almacenamiento`);
+      }
+      return {
+        ...b,
+        activeSpots: activeSpots.length,
+        readySpots: readySpots.length,
+        issues,
+      };
+    });
+
+    return {
+      channelActive: !!session,
+      adWatcherActive: !!(session?.adWatchTimer),
+      lastBuild: lastBuild ? { at: lastBuild.createdAt, details: lastBuild.details } : null,
+      recentBuilds: recentBuilds.map(b => ({ at: b.createdAt, details: b.details })),
+      blocks: diagnostics,
+    };
+  }
+
   // ─── Internal ──────────────────────────────────────────────────
 
   private async stopInternal(channelId: string): Promise<void> {
@@ -631,6 +697,38 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
 
     // Guardar fingerprint de la publicidad actual para el ad watcher
     session.adFingerprint = await this.computeAdFingerprint(session.channelId);
+
+    // ── Auditoría de publicidad: registrar qué spots se incluyeron ──────────────
+    {
+      const totalBlocks = new Set([
+        ...cuePoints.map(cp => cp.adBlockId),
+        ...(scheduleEntry?.preAdBlock ? [scheduleEntry.preAdBlock.id] : []),
+        ...(scheduleEntry?.postAdBlock ? [scheduleEntry.postAdBlock.id] : []),
+        ...(intervalBlock ? [intervalBlock.id] : []),
+      ]);
+      const downloadedList = Array.from(adDownloads.entries()).map(([vid]) => vid);
+      const skippedSpots = Array.from(allSpots.entries())
+        .filter(([vid]) => !adDownloads.has(vid))
+        .map(([vid, s]) => `${s.name}(${s.video.status},key=${s.video.processedKey ? 'proc' : s.video.originalKey ? 'orig' : 'NONE'})`);
+      this.log(session,
+        `[AD-AUDIT] Build: ${totalBlocks.size} bloques, ${allSpots.size} spots únicos, ` +
+        `${adDownloads.size} descargados, ${skippedSpots.length} omitidos` +
+        (skippedSpots.length > 0 ? ` → omitidos: ${skippedSpots.join(', ')}` : ''),
+      );
+      this.prisma.playoutLog.create({
+        data: {
+          channelId: session.channelId,
+          event: 'AD_BUILD',
+          details: {
+            blocks: totalBlocks.size,
+            totalSpots: allSpots.size,
+            downloaded: downloadedList.length,
+            skipped: skippedSpots,
+            spotsIncluded: Array.from(adDownloads.keys()),
+          },
+        },
+      }).catch(() => {});
+    }
 
     // ── 4. Construir concat.txt ──────────────────────────────────────────────────
 
@@ -2053,7 +2151,10 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       select: {
         id: true, isActive: true, rotationMode: true,
         spots: {
-          select: { id: true, videoId: true, isActive: true, weight: true, order: true },
+          select: {
+            id: true, videoId: true, isActive: true, weight: true, order: true,
+            video: { select: { processedKey: true, originalKey: true, status: true } },
+          },
           orderBy: { order: 'asc' },
         },
       },
@@ -2084,9 +2185,13 @@ export class PlayoutService implements OnModuleInit, OnModuleDestroy {
       try {
         const currentFp = await this.computeAdFingerprint(session.channelId);
         if (currentFp !== session.adFingerprint) {
+          const prev = JSON.parse(session.adFingerprint ?? '{}');
+          const curr = JSON.parse(currentFp);
+          const prevSpotCount = (prev.blocks ?? []).reduce((n: number, b: any) => n + (b.spots?.length ?? 0), 0);
+          const currSpotCount = (curr.blocks ?? []).reduce((n: number, b: any) => n + (b.spots?.length ?? 0), 0);
           this.log(
             session,
-            'Cambio en publicidad detectado (spots/tandas/cue points) → reconstruyendo emisión',
+            `Cambio en publicidad detectado → spots: ${prevSpotCount}→${currSpotCount}, bloques: ${prev.blocks?.length ?? 0}→${curr.blocks?.length ?? 0} → reconstruyendo emisión`,
           );
           session.scheduleChangePending = true;
           this.killSession(session);

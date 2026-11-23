@@ -1,5 +1,6 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiClient from '@/lib/api-client';
+import { toast } from 'sonner';
 
 export interface AdImpression {
   id: string;
@@ -71,5 +72,82 @@ export function useAdImpressions(
       return data;
     },
     enabled: !!channelId,
+  });
+}
+
+// ─── Diagnóstico de publicidad ───────────────────────────────
+
+export interface AdSpotDiag {
+  id: string;
+  name: string;
+  advertiser: string;
+  isActive: boolean;
+  weight: number;
+  video: {
+    id: string;
+    title: string;
+    status: string;
+    processedKey: string | null;
+    originalKey: string | null;
+    duration: number | null;
+  };
+}
+
+export interface AdBlockDiag {
+  id: string;
+  name: string;
+  isActive: boolean;
+  rotationMode: string;
+  spots: AdSpotDiag[];
+  activeSpots: number;
+  readySpots: number;
+  issues: string[];
+  _count: { cuePoints: number; impressions: number };
+}
+
+export interface AdBuildEntry {
+  at: string;
+  details: {
+    blocks: number;
+    totalSpots: number;
+    downloaded: number;
+    skipped: string[];
+    spotsIncluded: string[];
+  };
+}
+
+export interface AdDiagnostics {
+  channelActive: boolean;
+  adWatcherActive: boolean;
+  lastBuild: { at: string; details: AdBuildEntry['details'] } | null;
+  recentBuilds: AdBuildEntry[];
+  blocks: AdBlockDiag[];
+}
+
+export function useAdDiagnostics(channelId: string | null) {
+  return useQuery<AdDiagnostics>({
+    queryKey: ['ad-diagnostics', channelId],
+    queryFn: async () => {
+      const { data } = await apiClient.get(`/playout/${channelId}/ad-diagnostics`);
+      return data;
+    },
+    enabled: !!channelId,
+    refetchInterval: 30_000,
+  });
+}
+
+export function useRefreshAds() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (channelId: string) =>
+      apiClient.post(`/playout/${channelId}/refresh-ads`),
+    onSuccess: (_, channelId) => {
+      toast.success('Reconstrucción de publicidad iniciada');
+      setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ['ad-diagnostics', channelId] });
+        qc.invalidateQueries({ queryKey: ['ad-report-summary', channelId] });
+      }, 5000);
+    },
+    onError: () => toast.error('Error al forzar reconstrucción'),
   });
 }

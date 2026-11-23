@@ -85,6 +85,32 @@ export class PlayoutController {
   }
 
   /**
+   * Fuerza la reconstrucción de publicidad: mata FFmpeg para que re-descargue spots
+   * y reconstruya el concat con la configuración actual de tandas/spots.
+   */
+  @Post(':channelId/refresh-ads')
+  @UseGuards(JwtAuthGuard)
+  refreshAds(
+    @Param('channelId') channelId: string,
+    @CurrentUser('id') _userId: string,
+  ) {
+    return this.playoutService.forceRefreshAds(channelId);
+  }
+
+  /**
+   * Diagnóstico de publicidad: muestra la configuración actual de ad blocks,
+   * spots, y el último build de publicidad del canal.
+   */
+  @Get(':channelId/ad-diagnostics')
+  @UseGuards(JwtAuthGuard)
+  adDiagnostics(
+    @Param('channelId') channelId: string,
+    @CurrentUser('id') _userId: string,
+  ) {
+    return this.playoutService.getAdDiagnostics(channelId);
+  }
+
+  /**
    * Activa una fuente de ingesta: interrumpe la playlist y emite la señal externa.
    * Requiere que el canal esté activo.
    */

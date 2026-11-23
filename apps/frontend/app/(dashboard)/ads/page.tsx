@@ -28,6 +28,12 @@ import {
   PlaySquare,
   EyeOff,
   Eye,
+  RefreshCw,
+  Activity,
+  AlertTriangle,
+  CheckCircle2,
+  XCircle,
+  Wrench,
 } from 'lucide-react';
 import { Header } from '@/components/dashboard/Header';
 import { useChannels } from '@/hooks/useChannels';
@@ -55,7 +61,7 @@ import {
   type CuePoint,
   type CuePointType,
 } from '@/hooks/useCuePoints';
-import { useAdReportSummary, useAdImpressions } from '@/hooks/useAdReports';
+import { useAdReportSummary, useAdImpressions, useAdDiagnostics, useRefreshAds } from '@/hooks/useAdReports';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 
@@ -87,7 +93,7 @@ export default function AdsPage() {
   const { data: channels = [], isLoading: loadingChannels } = useChannels();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showSelector, setShowSelector] = useState(false);
-  const [activeTab, setActiveTab] = useState<'blocks' | 'cuepoints' | 'reports'>('blocks');
+  const [activeTab, setActiveTab] = useState<'blocks' | 'cuepoints' | 'reports' | 'diagnostics'>('blocks');
 
   useEffect(() => {
     if (channels.length > 0 && !selectedId) setSelectedId(channels[0].id);
@@ -160,7 +166,7 @@ export default function AdsPage() {
 
           {/* Tabs */}
           <div className="flex rounded-lg border border-white/10 overflow-hidden">
-            {([ ['blocks', Clapperboard, 'Tandas'], ['cuepoints', MapPin, 'Cue Points'], ['reports', BarChart3, 'Reportes'] ] as const).map(([tab, Icon, label]) => (
+            {([ ['blocks', Clapperboard, 'Tandas'], ['cuepoints', MapPin, 'Cue Points'], ['reports', BarChart3, 'Reportes'], ['diagnostics', Wrench, 'Diagnóstico'] ] as const).map(([tab, Icon, label]) => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -184,6 +190,7 @@ export default function AdsPage() {
             {activeTab === 'blocks' && <BlocksTab channelId={selectedId} />}
             {activeTab === 'cuepoints' && <CuePointsTab channelId={selectedId} />}
             {activeTab === 'reports' && <ReportsTab channelId={selectedId} />}
+            {activeTab === 'diagnostics' && <DiagnosticsTab channelId={selectedId} />}
           </>
         )}
       </div>
@@ -1096,6 +1103,200 @@ function CreateCuePointModal({ channelId, onClose }: { channelId: string; onClos
         </div>
       </form>
     </Modal>
+  );
+}
+
+// ─── Tab: Diagnóstico ────────────────────────────────────────
+
+function DiagnosticsTab({ channelId }: { channelId: string }) {
+  const { data: diag, isLoading } = useAdDiagnostics(channelId);
+  const refreshAds = useRefreshAds();
+
+  if (isLoading) return <div className="flex justify-center py-12"><div className="w-6 h-6 border-2 border-brand-500/30 border-t-brand-500 rounded-full animate-spin" /></div>;
+  if (!diag) return null;
+
+  const totalIssues = diag.blocks.reduce((n, b) => n + b.issues.length, 0);
+
+  return (
+    <div className="space-y-5">
+      {/* Estado general */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="glass-card p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Activity className={cn('w-3.5 h-3.5', diag.channelActive ? 'text-green-400' : 'text-slate-500')} />
+            <span className="text-xs text-slate-500">Canal</span>
+          </div>
+          <p className={cn('text-sm font-bold', diag.channelActive ? 'text-green-400' : 'text-slate-400')}>
+            {diag.channelActive ? 'Activo' : 'Detenido'}
+          </p>
+        </div>
+        <div className="glass-card p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <RefreshCw className={cn('w-3.5 h-3.5', diag.adWatcherActive ? 'text-green-400' : 'text-red-400')} />
+            <span className="text-xs text-slate-500">Ad Watcher</span>
+          </div>
+          <p className={cn('text-sm font-bold', diag.adWatcherActive ? 'text-green-400' : 'text-red-400')}>
+            {diag.adWatcherActive ? 'Activo' : 'Inactivo'}
+          </p>
+        </div>
+        <div className="glass-card p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Clock className="w-3.5 h-3.5 text-slate-500" />
+            <span className="text-xs text-slate-500">Último build</span>
+          </div>
+          <p className="text-sm font-bold text-white">
+            {diag.lastBuild ? fmtDate(diag.lastBuild.at) : 'Nunca'}
+          </p>
+        </div>
+        <div className="glass-card p-4">
+          <div className="flex items-center gap-2 mb-2">
+            {totalIssues > 0 ? <AlertTriangle className="w-3.5 h-3.5 text-amber-400" /> : <CheckCircle2 className="w-3.5 h-3.5 text-green-400" />}
+            <span className="text-xs text-slate-500">Problemas</span>
+          </div>
+          <p className={cn('text-sm font-bold', totalIssues > 0 ? 'text-amber-400' : 'text-green-400')}>
+            {totalIssues > 0 ? `${totalIssues} problema${totalIssues !== 1 ? 's' : ''}` : 'Sin problemas'}
+          </p>
+        </div>
+      </div>
+
+      {/* Botón forzar rebuild */}
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-slate-400">
+          Si los anuncios no se actualizan, forzá una reconstrucción manual.
+        </p>
+        <button
+          onClick={() => refreshAds.mutate(channelId)}
+          disabled={!diag.channelActive || refreshAds.isPending}
+          className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium bg-brand-600 hover:bg-brand-500 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <RefreshCw className={cn('w-3.5 h-3.5', refreshAds.isPending && 'animate-spin')} />
+          {refreshAds.isPending ? 'Reconstruyendo...' : 'Forzar reconstrucción'}
+        </button>
+      </div>
+
+      {/* Alertas */}
+      {totalIssues > 0 && (
+        <div className="glass-card p-4 space-y-2 border border-amber-500/20 bg-amber-500/5">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-400" />
+            <h3 className="text-xs font-semibold text-amber-300 uppercase tracking-wider">Problemas detectados</h3>
+          </div>
+          {diag.blocks.flatMap((b) =>
+            b.issues.map((issue, i) => (
+              <div key={`${b.id}-${i}`} className="flex items-start gap-2 text-xs text-amber-200/80">
+                <XCircle className="w-3 h-3 text-amber-400 flex-shrink-0 mt-0.5" />
+                <span><strong>{b.name}:</strong> {issue}</span>
+              </div>
+            )),
+          )}
+        </div>
+      )}
+
+      {/* Estado de cada tanda */}
+      <div className="glass-card p-4 space-y-3">
+        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Estado de tandas</h3>
+        {diag.blocks.length === 0 ? (
+          <p className="text-xs text-slate-600 py-3 text-center">No hay tandas configuradas</p>
+        ) : (
+          <div className="space-y-2">
+            {diag.blocks.map((b) => (
+              <div key={b.id} className={cn('flex items-center gap-3 px-3 py-2.5 rounded-xl bg-surface-700/40 border', b.issues.length > 0 ? 'border-amber-500/20' : 'border-white/5')}>
+                <div className={cn('w-2 h-2 rounded-full flex-shrink-0', b.isActive && b.readySpots > 0 ? 'bg-green-400' : b.isActive ? 'bg-amber-400' : 'bg-slate-600')} />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium text-white truncate">{b.name}</p>
+                  <p className="text-[11px] text-slate-500">
+                    {b.spots.length} spot{b.spots.length !== 1 ? 's' : ''} total · {b.activeSpots} activo{b.activeSpots !== 1 ? 's' : ''} · {b.readySpots} listo{b.readySpots !== 1 ? 's' : ''} para emitir
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <span className="text-[11px] text-slate-500">{b._count.impressions} imp.</span>
+                  {b.issues.length > 0 ? (
+                    <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                  ) : (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-green-400" />
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Historial de builds */}
+      {diag.recentBuilds.length > 0 && (
+        <div className="glass-card p-4 space-y-3">
+          <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Historial de builds de publicidad</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-slate-500 border-b border-white/5">
+                  <th className="pb-2 font-medium">Fecha</th>
+                  <th className="pb-2 font-medium">Bloques</th>
+                  <th className="pb-2 font-medium">Spots</th>
+                  <th className="pb-2 font-medium">Descargados</th>
+                  <th className="pb-2 font-medium">Omitidos</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {diag.recentBuilds.map((build, i) => (
+                  <tr key={i} className="text-slate-400">
+                    <td className="py-2 pr-4 font-mono whitespace-nowrap">{fmtDate(build.at)}</td>
+                    <td className="py-2 pr-4">{build.details.blocks}</td>
+                    <td className="py-2 pr-4">{build.details.totalSpots}</td>
+                    <td className="py-2 pr-4">
+                      <span className={cn(build.details.downloaded > 0 ? 'text-green-400' : 'text-slate-500')}>
+                        {build.details.downloaded}
+                      </span>
+                    </td>
+                    <td className="py-2">
+                      {build.details.skipped.length > 0 ? (
+                        <span className="text-amber-400" title={build.details.skipped.join(', ')}>
+                          {build.details.skipped.length} — {build.details.skipped.join(', ')}
+                        </span>
+                      ) : (
+                        <span className="text-green-400">0</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Detalle de spots por tanda */}
+      {diag.blocks.some(b => b.spots.length > 0) && (
+        <div className="glass-card p-4 space-y-3">
+          <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Detalle de spots</h3>
+          {diag.blocks.filter(b => b.spots.length > 0).map((b) => (
+            <div key={b.id} className="space-y-1">
+              <p className="text-xs font-medium text-white">{b.name} <span className="text-slate-500 font-normal">({b.rotationMode})</span></p>
+              <div className="space-y-1 ml-3">
+                {b.spots.map((s) => {
+                  const hasKey = !!(s.video.processedKey || s.video.originalKey);
+                  const ready = s.video.status === 'READY' && hasKey;
+                  return (
+                    <div key={s.id} className={cn('flex items-center gap-2 text-[11px]', !s.isActive && 'opacity-50')}>
+                      <div className={cn('w-1.5 h-1.5 rounded-full flex-shrink-0', ready && s.isActive ? 'bg-green-400' : 'bg-red-400')} />
+                      <span className="text-white truncate">{s.name}</span>
+                      <span className="text-slate-600">·</span>
+                      <span className="text-slate-500">{s.advertiser}</span>
+                      <span className="text-slate-600">·</span>
+                      <span className={cn(s.video.status === 'READY' ? 'text-green-400' : 'text-amber-400')}>
+                        {s.video.status}
+                      </span>
+                      {!hasKey && <span className="text-red-400 font-medium">SIN ARCHIVO</span>}
+                      {!s.isActive && <span className="text-slate-500 italic">desactivado</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
